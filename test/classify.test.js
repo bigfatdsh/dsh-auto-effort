@@ -239,3 +239,64 @@ test('preferenceFor 覆盖全部档位，不返回 undefined', () => {
     assert.ok(preferenceFor(tier).length > 0)
   }
 })
+
+// ---------------------------------------------------------------------------
+// 上下文继承：含糊的短追问 vs 同样含糊但很重的请求
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {string} text - 用户文本。
+ * @param {'off'|'low'|'high'|'max'|null} previousTier - 上一轮档位。
+ * @returns {object} 判定结果。
+ */
+function judge(text, previousTier) {
+  return classify({ messages: [user(text)], toolCount: 30, previousTier })
+}
+
+test('任务进行中：含糊的短追问继承上一轮档位，不再被判低', () => {
+  for (const text of ['把它改成流式', '继续', '这个再快一点', '上面那个报错呢', '然后呢', '再看看']) {
+    const decision = judge(text, 'max')
+    assert.equal(decision.tier, 'max', `${text} → ${decision.tier} (${decision.reason})`)
+    assert.equal(decision.inherited, true, `${text} 应标记为继承`)
+    assert.ok(
+      decision.signals.includes('referent-inherit') || decision.signals.includes('continuation-inherit'),
+      `${text} 缺继承信号：${decision.signals.join('+')}`,
+    )
+  }
+})
+
+test('任务进行中：但问候/收尾仍然降下来（上下文不该把闲聊拉高）', () => {
+  for (const text of ['你好', '谢谢', '好的', 'ok', '在吗']) {
+    const decision = judge(text, 'max')
+    assert.ok(TIERS.indexOf(decision.tier) <= 1, `${text} 被拉到了 ${decision.tier}`)
+    assert.equal(decision.inherited, false, `${text} 不该标记继承`)
+  }
+})
+
+test('任务进行中：长消息自带信号，不靠继承', () => {
+  const text = '帮我把 lib/report.js 里的导出逻辑改成流式写入 /tmp/out.csv，并且补一个回归测试，注意不要动其它调用点，另外要把列顺序固定住'
+  const decision = judge(text, 'max')
+  assert.equal(decision.inherited, false)
+  assert.ok(TIERS.indexOf(decision.tier) >= 2, `长消息应自带高档位，实际 ${decision.tier}`)
+})
+
+test('新会话或轻任务：同样的话不继承，保持低档', () => {
+  for (const previousTier of [null, undefined, 'off', 'low']) {
+    const decision = judge('把它改成流式', previousTier)
+    assert.equal(decision.inherited, false, `previousTier=${previousTier} 不该继承`)
+  }
+  assert.equal(judge('继续', 'low').tier, 'low', '轻任务里的"继续"不该升档')
+  assert.equal(judge('继续', null).tier, 'low')
+})
+
+test('继承不会越过上一轮：上一轮 high 就继承到 high，不擅自到 max', () => {
+  const decision = judge('这个再快一点', 'high')
+  assert.equal(decision.tier, 'high')
+  assert.equal(decision.inherited, true)
+})
+
+test('继承只在短消息上生效（词数上限内）', () => {
+  const medium = `把这个改一下 ${'注意保持行宽'.repeat(12)}`
+  const decision = judge(medium, 'max')
+  assert.equal(decision.inherited, false, `词数 ${decision.words} 不该继承`)
+})
