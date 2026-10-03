@@ -708,6 +708,11 @@ test('装配：任务进行中时，含糊短追问按上一轮档位走；新�
     await host.waterfall(request('把它改成流式', { sessionId: 'work' }))
     assert.equal(effortSeen(), 'max', '短追问必须继承任务的档位')
 
+    // 第三轮：先来一句闲聊（不清空任务槽位），再说一句含糊短追问 → 仍然继承
+    await host.waterfall(request('好的', { sessionId: 'work' }))
+    await host.waterfall(request('那块再收一下', { sessionId: 'work' }))
+    assert.equal(effortSeen(), 'max', '跨过一句闲聊后仍应继承（任务槽位不被闲聊清空）')
+
     // 另一条会话同样的话：没有"正在进行的任务"，不继承
     await host.waterfall(request('把它改成流式', { sessionId: 'fresh' }))
     assert.notEqual(effortSeen(), 'max', '新会话不该继承别的会话的档位')
@@ -717,8 +722,13 @@ test('装配：任务进行中时，含糊短追问按上一轮档位走；新�
     assert.equal(effortSeen(), 'off', `收尾应降下来，实际 ${effortSeen()}`)
 
     const decisions = (await host.read(`${ROUTE_PATH}?decisions=1`)).decisions
+    if (!decisions.some((row) => row.inherited === true)) {
+      // eslint-disable-next-line no-console -- 失败现场
+        console.error('DBG all decisions:', JSON.stringify(decisions))
+      console.error('DBG adapterCalls:', JSON.stringify(host.adapterCalls))
+    }
     const inherited = decisions.filter((row) => row.inherited === true)
-    assert.equal(inherited.length, 1, `只应有一次继承：${JSON.stringify(decisions)}`)
+    assert.equal(inherited.length, 2, `应有两次继承：${JSON.stringify(decisions)}`)
     assert.equal(inherited[0].chosen, null)
     assert.equal(inherited[0].tier, 'max')
   })
@@ -744,5 +754,62 @@ test('装配：续跑请求不更新"上一轮档位"（沿用本任务档位）
     await host.waterfall(request('这个再快一点', { sessionId: 'w' }))
     const last = host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)
     assert.equal(last.effort, 'max', `续跑后仍应继承 max，实际 ${last.effort}`)
+  })
+})
+
+test('装配：任务槽位有窗口——隔了太多条用户消息后不再继承', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'off' })
+    apply(host.ctx, { mode: 'auto', log: false })
+    const effortSeen = () => host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)?.effort
+
+    await host.waterfall(request('审计这 12 个模块的架构、安全、性能，逐条给根因与修复，必须详尽完整，另外还要给出回归测试与上线清单', { sessionId: 'w' }))
+    assert.equal(effortSeen(), 'max')
+    // 连续 6 条与任务无关的轻消息（各自都判低），把窗口推过去
+    for (let i = 0; i < 6; i += 1) await host.waterfall(request('为什么', { sessionId: 'w' }))
+    await host.waterfall(request('那块再收一下', { sessionId: 'w' }))
+    assert.notEqual(effortSeen(), 'max', `超出窗口后不该再继承，实际 ${effortSeen()}`)
+  })
+})
+
+test('装配：窗口可配（taskMaxAge 调大后重新继承）', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'off' })
+    apply(host.ctx, { mode: 'auto', log: false, taskMaxAge: 10 })
+    const effortSeen = () => host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)?.effort
+    await host.waterfall(request('审计这 12 个模块，必须详尽完整，逐条给根因与修复，另外还要给出回归测试与上线清单', { sessionId: 'w' }))
+    for (let i = 0; i < 6; i += 1) await host.waterfall(request('为什么', { sessionId: 'w' }))
+    await host.waterfall(request('那块再收一下', { sessionId: 'w' }))
+    assert.equal(effortSeen(), 'max', `窗口内应继承，实际 ${effortSeen()}`)
+  })
+})
+
+test('装配：用户转向带锚点的新事情后，旧任务槽位作废', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'off' })
+    apply(host.ctx, { mode: 'auto', log: false })
+    const effortSeen = () => host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)?.effort
+
+    await host.waterfall(request('审计这 12 个模块的架构、安全、性能，逐条给根因与修复，必须详尽完整，另外还要给出回归测试与上线清单', { sessionId: 'w' }))
+    assert.equal(effortSeen(), 'max')
+    await host.waterfall(request('那块再收一下', { sessionId: 'w' }))
+    assert.equal(effortSeen(), 'max', '仍在同一件事上时应继承')
+
+    // 转向：带具体路径的轻消息 → 旧任务作废
+    await host.waterfall(request('看一下 /tmp/out.csv', { sessionId: 'w' }))
+    await host.waterfall(request('继续', { sessionId: 'w' }))
+    assert.notEqual(effortSeen(), 'max', `旧任务应已作废，实际 ${effortSeen()}`)
+  })
+})
+
+test('装配：闲聊不作废任务槽位（"好的"之后"继续"仍是同一件事）', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'off' })
+    apply(host.ctx, { mode: 'auto', log: false })
+    const effortSeen = () => host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)?.effort
+    await host.waterfall(request('重构整个项目的数据层，要求零错误、不能遗漏任何调用点，先出方案再按步骤执行', { sessionId: 'w' }))
+    for (const filler of ['好的', '嗯', '收到']) await host.waterfall(request(filler, { sessionId: 'w' }))
+    await host.waterfall(request('继续', { sessionId: 'w' }))
+    assert.equal(effortSeen(), 'max', '跨过三句闲聊后仍应继承（槽位不被闲聊清空）')
   })
 })
