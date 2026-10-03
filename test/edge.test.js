@@ -813,3 +813,33 @@ test('装配：闲聊不作废任务槽位（"好的"之后"继续"仍是同一�
     assert.equal(effortSeen(), 'max', '跨过三句闲聊后仍应继承（槽位不被闲聊清空）')
   })
 })
+
+test('装配：手选任一档位经完整装配后都不被改写（含边界全组合）', async () => {
+  await withTempHome(async () => {
+    for (const floor of ['observed', 'adapter-default']) {
+      for (const ceiling of ['max', 'adapter-default', 'off']) {
+        for (const level of ['off', 'low', 'high', 'max']) {
+          const host = fakeHost({ defaultEffort: 'high' })
+          apply(host.ctx, { mode: 'auto', log: false, effortFloor: floor, effortCeiling: ceiling })
+          // 用最容易被判低的输入去撞它
+          const req = request('你好', { sessionId: `s-${floor}-${ceiling}-${level}`, reasoningEffort: level })
+          await host.waterfall(req)
+          const seen = host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)
+          assert.equal(seen.effort, level, `手选 ${level} 在 floor=${floor} ceiling=${ceiling} 下被改成 ${seen.effort}`)
+          assert.equal(req.reasoningEffort, level, '请求对象也必须保持原值')
+        }
+      }
+    }
+  })
+})
+
+test('装配：选 auto 时仍然正常判定（保护只针对手选值）', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'high' })
+    apply(host.ctx, { mode: 'auto', log: false })
+    await host.waterfall(request('你好', { sessionId: 's1', reasoningEffort: 'auto' }))
+    assert.equal(host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1).effort, 'off')
+    await host.waterfall(request('全面审查这 8 个模块，必须零错误，不能遗漏任何一处。第一步建清单，第二步核对，第三步修复。', { sessionId: 's2', reasoningEffort: 'auto' }))
+    assert.equal(host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1).effort, 'max')
+  })
+})
