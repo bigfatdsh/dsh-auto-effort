@@ -394,11 +394,18 @@ async function mountClient(options = {}) {
     useSyncExternalStore: (subscribe, get) => {
       const index = cursor++
       if (!(index in cells)) {
-        cells[index] = get()
+        const snapshot = get()
+        cells[index] = snapshot
         subscribe(() => {
           cells[index] = get()
           render()
         })
+        // React 的语义：订阅之后要再查一次快照；期间变了就立刻重渲染。
+        // 少了这一步，"effect 里撤回标记"这类变更在替身里看不到。
+        if (get() !== snapshot) {
+          cells[index] = get()
+          render()
+        }
       }
       return cells[index]
     },
@@ -534,4 +541,47 @@ test('取消：选真实等级后，触发器与菜单的勾一起交回宿主',
   assert.equal(dom.effortText(), 'High', '显示交回宿主')
   assert.equal(dom.nodes.highOption.menuState.checked, 'true', '勾留在 High')
   assert.equal(dom.nodes.autoOption.menuState.checked, 'false')
+})
+
+test('标记不许撒谎：宿主回写真实档位时，标记必须撤回（含刷新后的持久化残留）', async () => {
+  // 现场复现：用户点过 Auto（localStorage 记住），但会话里其实没落盘，宿主下发的是 max。
+  const first = await mountClient()
+  first.dom.click(first.dom.nodes.autoOption)
+  first.render()
+  await first.dom.flush()
+  assert.equal(first.dom.effortText(), 'Auto', '刚点完是乐观显示')
+  assert.equal(persistentStorage.get('dsh-auto-effort:auto'), '1', '标记已持久化')
+
+  // 宿主重渲染：把等级写回真实值 max（这正是"Auto 没落盘"时的表现）
+  const second = await mountClient({ keepStorage: true })
+  second.dom.setEffortText('max')
+  second.dom.resetMenu()
+  second.dom.mutate()
+  await second.dom.flush()
+  assert.equal(second.dom.triggerAttr(), null, '宿主是 max，就不该有 Auto 标记')
+  assert.equal(second.dom.effortText(), 'max', '文字必须是宿主的事实')
+  assert.equal(second.dom.nodes.autoOption.menuState.checked, 'false')
+  assert.equal(second.dom.nodes.highOption.menuState.checked, 'true')
+
+  // 而且这次撤回是持久的：再挂载一次也不会又冒出 Auto
+  const third = await mountClient({ keepStorage: true })
+  third.dom.setEffortText('max')
+  third.dom.mutate()
+  await third.dom.flush()
+  assert.equal(third.dom.triggerAttr(), null, '撤回后不该复活')
+})
+
+test('标记不许撒谎：点 Auto 后宿主仍回写 max，标记自动撤回', async () => {
+  const { dom, render } = await mountClient()
+  dom.click(dom.nodes.autoOption)
+  render()
+  await dom.flush()
+  assert.equal(dom.effortText(), 'Auto')
+
+  dom.setEffortText('max')
+  dom.resetMenu()
+  dom.mutate()
+  await dom.flush()
+  assert.equal(dom.triggerAttr(), null, '宿主说 max，标记就得让位')
+  assert.equal(dom.effortText(), 'max')
 })
