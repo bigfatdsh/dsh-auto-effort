@@ -419,3 +419,76 @@ test('applyBounds：只有 observed / adapter-default 下界才把已有强度�
   assert.equal(applyBounds({ effortFloor: 'low' }, 'max'), 'off')
   assert.equal(applyBounds({}, 'max'), 'off')
 })
+
+// ---------------------------------------------------------------------------
+// 手选档位保护：任何模式下都不许被改（用户明确要求）
+// ---------------------------------------------------------------------------
+
+test('手选具体档位：四种边界组合下都一个字节都不改', async () => {
+  const policies = [
+    { effortFloor: 'observed', effortCeiling: 'max' },
+    { effortFloor: 'observed', effortCeiling: 'adapter-default' },
+    { effortFloor: 'adapter-default', effortCeiling: 'max' },
+    { effortFloor: undefined, effortCeiling: undefined },
+  ]
+  for (const level of ['off', 'low', 'high', 'max']) {
+    for (const extra of policies) {
+      const options = request('你好', { reasoningEffort: level })
+      const outcome = await decideRequest(
+        input(options, { policy: { minTier: 'off', maxTier: 'max', effortId: 'auto', ...extra } }),
+      )
+      assert.equal(outcome.options, options, `${level} 在 ${JSON.stringify(extra)} 下被改写了`)
+      assert.equal(outcome.options.reasoningEffort, level)
+      // 手选值时要么直接让位（pinned），要么算出来正好等于它（unchanged）
+      assert.ok(['pinned', 'unchanged'].includes(outcome.action), `${level} → ${outcome.action}`)
+    }
+  }
+})
+
+test('手选具体档位：mode=pin 时连判定都不做', async () => {
+  for (const level of ['off', 'low', 'high', 'max']) {
+    const options = request('全面审查这 8 个模块，必须零错误，不能遗漏任何一处。第一步建清单，第二步核对，第三步修复。', { reasoningEffort: level })
+    const outcome = await decideRequest(input(options, { mode: 'pin' }))
+    assert.equal(outcome.action, 'pinned', `${level} 应 pinned，实际 ${outcome.action}`)
+    assert.equal(outcome.options.reasoningEffort, level)
+  }
+})
+
+test('手选具体档位：mode=off 时原样放行', async () => {
+  for (const level of ['off', 'low', 'high', 'max']) {
+    const options = request('帮我修一下这个报错', { reasoningEffort: level })
+    const outcome = await decideRequest(input(options, { mode: 'off' }))
+    assert.equal(outcome.options, options, `${level} 被改写了`)
+    assert.equal(outcome.action, 'disabled')
+  }
+})
+
+test('只有虚拟档位 auto 才允许被调整（对照组）', async () => {
+  const options = request('你好', { reasoningEffort: 'auto' })
+  const outcome = await decideRequest(
+    input(options, { policy: { minTier: 'off', maxTier: 'max', effortFloor: 'observed', effortCeiling: 'max', effortId: 'auto' } }),
+  )
+  assert.equal(outcome.action, 'applied')
+  assert.equal(outcome.options.reasoningEffort, 'off')
+})
+
+test('手选档位保护：与 effortFloor 的关系是"默认保护、显式 off 才放开"', async () => {
+  // 显式 effortFloor: 'off' 是"连手选值也交给判定"的主动选择
+  const options = request('你好', { reasoningEffort: 'high' })
+  const relaxed = await decideRequest(
+    input(options, { policy: { minTier: 'off', maxTier: 'max', effortFloor: 'off', effortCeiling: 'max', effortId: 'auto' } }),
+  )
+  assert.equal(relaxed.action, 'applied')
+  assert.equal(relaxed.effort, 'off')
+
+  // 未配（默认）或 observed：手选值受保护，且上界也压不动它
+  for (const floor of [undefined, 'observed']) {
+    for (const ceiling of ['max', 'adapter-default', 'off']) {
+      const picked = request('你好', { reasoningEffort: 'low' })
+      const outcome = await decideRequest(
+        input(picked, { policy: { minTier: 'off', maxTier: 'max', effortFloor: floor, effortCeiling: ceiling, effortId: 'auto' } }),
+      )
+      assert.equal(outcome.options.reasoningEffort, 'low', `floor=${floor} ceiling=${ceiling} 改写了手选的 low`)
+    }
+  }
+})
