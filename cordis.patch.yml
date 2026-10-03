@@ -1,0 +1,34 @@
+# dsh-auto-effort —— DSH bundle 补丁。
+#
+# 本文件只插入一行：把「推理等级 auto」挂到 Host 根部。
+#
+# 为什么挂在根、而不是某个 preset 里：
+#   * `llm/stream` 是所有模型调用都会经过的那条瀑布。挂在根部，一份判定服务所有
+#     preset、所有会话、所有子代理，行为一致。
+#   * 判定是纯规则、0 token、0 往返，不产生额外调用；挂在根上也不会因为"谁先加载"
+#     而出现两种行为。
+#
+# 这一行不注册任何工具、不改消息、不改系统提示、不改采样参数：它只决定「这一次
+# 调用用多强的推理」。
+#
+# 默认值刻意保守：
+#   * mode: auto      —— 每次请求判定（需求指定的默认档）。
+#   * enabled: true   —— 首次启动就是自动；关掉只需点一下胶囊。
+#   * minTier/maxTier —— 不设人为上下限，判到什么用什么。
+#   * effortFloor: off        —— 不设人为下界：判定说这次只需要 low，就真的是 low
+#     （本机 profile 把全局默认钉在 reasoningEffort: max 上，"auto" 要能生效就
+#     必须允许它降下来；要保护选择器里手选的值，把它改成 observed）。
+#   * effortCeiling: max      —— 不设人为上限：只有真的需要多想时才升到 max。
+
+- insert:
+    - id: auto-effort
+      name: 'dsh-auto-effort'
+      config:
+        mode: auto
+        enabled: true
+        persist: true
+        minTier: 'off'
+        maxTier: max
+        effortFloor: 'off'
+        effortCeiling: max
+        log: true
