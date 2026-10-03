@@ -246,27 +246,37 @@ test('preferenceFor 覆盖全部档位，不返回 undefined', () => {
 
 /**
  * @param {string} text - 用户文本。
- * @param {'off'|'low'|'high'|'max'|null} previousTier - 上一轮档位。
+ * @param {'off'|'low'|'high'|'max'|null} tier - 进行中的任务档位（null 表示没有）。
+ * @param {object} [extra] - `{ age, toolCount, maxAge }`。
  * @returns {object} 判定结果。
  */
-function judge(text, previousTier) {
-  return classify({ messages: [user(text)], toolCount: 30, previousTier })
+function judge(text, tier, extra = {}) {
+  return classify({
+    messages: [user(text)],
+    toolCount: extra.toolCount ?? 30,
+    previousTask: tier === null || tier === undefined ? undefined : { tier, age: extra.age ?? 0, maxAge: extra.maxAge ?? 3 },
+  })
 }
 
-test('任务进行中：含糊的短追问继承上一轮档位，不再被判低', () => {
-  for (const text of ['把它改成流式', '继续', '这个再快一点', '上面那个报错呢', '然后呢', '再看看']) {
+test('任务进行中：含糊的短追问继承任务档位——不靠枚举指代词', () => {
+  // 这些说法都没有被"指代词表"列出来，但仍然必须继承：判据是"缺少具体锚点"。
+  for (const text of ['把它改成流式', '继续', '这个再快一点', '上面那个报错呢', '然后呢', '再看看',
+    '那块再收一下', '顺手弄下', '接着弄', '再调调', '那个地方也看看', '剩下的呢', '同一个问题']) {
     const decision = judge(text, 'max')
     assert.equal(decision.tier, 'max', `${text} → ${decision.tier} (${decision.reason})`)
     assert.equal(decision.inherited, true, `${text} 应标记为继承`)
-    assert.ok(
-      decision.signals.includes('referent-inherit') || decision.signals.includes('continuation-inherit'),
-      `${text} 缺继承信号：${decision.signals.join('+')}`,
-    )
   }
 })
 
-test('任务进行中：但问候/收尾仍然降下来（上下文不该把闲聊拉高）', () => {
-  for (const text of ['你好', '谢谢', '好的', 'ok', '在吗']) {
+test('任务进行中：带具体锚点的短消息不继承（它自己说清了）', () => {
+  for (const text of ['看一下 lib/index.js', '把 /tmp/a.csv 删了', '跑一下 npm test', '第 3 步是什么']) {
+    const decision = judge(text, 'max')
+    assert.equal(decision.inherited, false, `${text} 有锚点，不该走继承`)
+  }
+})
+
+test('任务进行中：问候/收尾仍然降下来（上下文不该把闲聊拉高）', () => {
+  for (const text of ['你好', '谢谢', '好的', 'ok', '在吗', '辛苦了', '没问题']) {
     const decision = judge(text, 'max')
     assert.ok(TIERS.indexOf(decision.tier) <= 1, `${text} 被拉到了 ${decision.tier}`)
     assert.equal(decision.inherited, false, `${text} 不该标记继承`)
@@ -281,18 +291,29 @@ test('任务进行中：长消息自带信号，不靠继承', () => {
 })
 
 test('新会话或轻任务：同样的话不继承，保持低档', () => {
-  for (const previousTier of [null, undefined, 'off', 'low']) {
-    const decision = judge('把它改成流式', previousTier)
-    assert.equal(decision.inherited, false, `previousTier=${previousTier} 不该继承`)
+  for (const tier of [null, undefined, 'off', 'low']) {
+    const decision = judge('把它改成流式', tier)
+    assert.equal(decision.inherited, false, `task=${tier} 不该继承`)
   }
   assert.equal(judge('继续', 'low').tier, 'low', '轻任务里的"继续"不该升档')
   assert.equal(judge('继续', null).tier, 'low')
 })
 
-test('继承不会越过上一轮：上一轮 high 就继承到 high，不擅自到 max', () => {
+test('继承不会越过任务档位：任务 high 就继承到 high，不擅自到 max', () => {
   const decision = judge('这个再快一点', 'high')
   assert.equal(decision.tier, 'high')
   assert.equal(decision.inherited, true)
+})
+
+test('继承窗口：任务之后过了太多条用户消息就翻篇（跨过闲聊不算翻篇）', () => {
+  assert.equal(judge('那块再收一下', 'max', { age: 1 }).tier, 'max')
+  assert.equal(judge('那块再收一下', 'max', { age: 3 }).tier, 'max', '窗口内仍然有效')
+  const stale = judge('那块再收一下', 'max', { age: 8 })
+  assert.equal(stale.inherited, false, '超出窗口不该继承')
+  assert.ok(TIERS.indexOf(stale.tier) <= 1)
+
+  // 窗口可配
+  assert.equal(judge('那块再收一下', 'max', { age: 5, maxAge: 6 }).inherited, true)
 })
 
 test('继承只在短消息上生效（词数上限内）', () => {
