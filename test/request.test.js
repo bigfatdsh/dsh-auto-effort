@@ -334,7 +334,7 @@ test('选择器选了 auto：模型目录里还没登记 auto 时，按物理档
   assert.ok(['high', 'max'].includes(outcome.effort))
 })
 
-test('选择器选了 auto：续跑与原样放行的分支必须摘掉这个虚拟值', async () => {
+test('选择器选了 auto：续跑分支一个字节都不改（留着 auto 才能让外层替回本会话档位）', async () => {
   const options = request('帮我改这个函数', {
     reasoningEffort: 'auto',
     messages: [
@@ -342,9 +342,12 @@ test('选择器选了 auto：续跑与原样放行的分支必须摘掉这个虚
       { role: 'tool', content: 'done', toolCallId: 'c1' },
     ],
   })
-  const outcome = await decideRequest(input(options, { policy: { minTier: 'off', maxTier: 'max', effortFloor: 'off', effortCeiling: 'max', effortId: 'auto' } }))
+  const outcome = await decideRequest(
+    input(options, { policy: { minTier: 'off', maxTier: 'max', effortFloor: 'observed', effortCeiling: 'max', effortId: 'auto' } }),
+  )
   assert.equal(outcome.action, 'continuation')
-  assert.equal(Object.hasOwn(outcome.options, 'reasoningEffort'), false, '不能把 auto 交给适配器')
+  assert.equal(outcome.options, options, '必须原样返回同一个对象')
+  assert.equal(outcome.options.reasoningEffort, 'auto', 'auto 要留着给外层翻译')
 })
 
 test('关闭档：选了 auto 也还原成模型默认，而不是把 auto 传下去', async () => {
@@ -359,6 +362,34 @@ test('辅助调用：选了 auto 同样摘掉', async () => {
   const outcome = await decideRequest(input(options, { policy: { effortId: 'auto' } }))
   assert.equal(outcome.action, 'auxiliary')
   assert.equal(Object.hasOwn(outcome.options, 'reasoningEffort'), false)
+})
+
+test('默认下界 observed：手选 high 时一个字节都不改（这条是实测踩过的坑）', async () => {
+  const options = request('你好', { reasoningEffort: 'high' })
+  const outcome = await decideRequest(
+    input(options, { policy: { minTier: 'off', maxTier: 'max', effortFloor: 'observed', effortCeiling: 'max', effortId: 'auto' } }),
+  )
+  assert.equal(outcome.action, 'unchanged')
+  assert.equal(outcome.options, options, '必须原样返回同一个对象')
+  assert.equal(outcome.effort, 'high')
+})
+
+test('默认下界 observed：手选 auto 时仍由判定接管（auto 不是真实档位）', async () => {
+  const options = request('你好', { reasoningEffort: 'auto' })
+  const outcome = await decideRequest(
+    input(options, { policy: { minTier: 'off', maxTier: 'max', effortFloor: 'observed', effortCeiling: 'max', effortId: 'auto' } }),
+  )
+  assert.equal(outcome.action, 'applied')
+  assert.equal(outcome.effort, 'off')
+})
+
+test('mode=pin：手选任意具体档位都完全不判', async () => {
+  for (const level of ['off', 'low', 'high', 'max']) {
+    const options = request('帮我全面审查并修复所有问题', { reasoningEffort: level })
+    const outcome = await decideRequest(input(options, { mode: 'pin' }))
+    assert.equal(outcome.action, 'pinned', `${level} 应 pinned`)
+    assert.equal(outcome.options, options, `${level} 必须原样返回`)
+  }
 })
 
 test('畸形输入不抛错', async () => {
