@@ -61,7 +61,8 @@ test('配置校验：空配置补全默认值，且默认就是需求指定的 a
   assert.equal(parsed.value.mode, 'auto')
   assert.equal(parsed.value.enabled, true)
   assert.equal(parsed.value.persist, true)
-  assert.equal(parsed.value.effortFloor, 'off')
+  // 默认守卫手选档位：手选 high 不该被降（实测踩过）
+  assert.equal(parsed.value.effortFloor, 'observed')
   assert.equal(parsed.value.effortCeiling, 'max')
   assert.equal(parsed.value.minTier, 'off')
   assert.equal(parsed.value.maxTier, 'max')
