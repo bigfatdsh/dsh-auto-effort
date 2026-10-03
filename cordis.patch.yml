@@ -15,9 +15,9 @@
 #   * mode: auto      —— 每次请求判定（需求指定的默认档）。
 #   * enabled: true   —— 首次启动就是自动；关掉只需点一下胶囊。
 #   * minTier/maxTier —— 不设人为上下限，判到什么用什么。
-#   * effortFloor: off        —— 不设人为下界：判定说这次只需要 low，就真的是 low
-#     （本机 profile 把全局默认钉在 reasoningEffort: max 上，"auto" 要能生效就
-#     必须允许它降下来；要保护选择器里手选的值，把它改成 observed）。
+#   * effortFloor: observed   —— **手选的档位不许被降**。请求上带着真实档位（你在列表里
+#     选的 low/high/max）时，它就是下界；虚拟档位 auto 不算真实档位，判定照常接管。
+#     这是实测教训：早先默认 off，手选 high 会被一句"你好"降成 off。
 #   * effortCeiling: max      —— 不设人为上限：只有真的需要多想时才升到 max。
 
 - insert:
@@ -29,6 +29,6 @@
         persist: true
         minTier: 'off'
         maxTier: max
-        effortFloor: 'off'
+        effortFloor: observed
         effortCeiling: max
         log: true
