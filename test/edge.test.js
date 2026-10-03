@@ -220,6 +220,25 @@ test('装配：模型没有推理能力时不追加 Auto', async () => {
   })
 })
 
+test('回归：decision 为 null 的动作（关闭档位）不得抛错', async () => {
+  await withTempHome(async () => {
+    for (const mode of ['off', 'auto']) {
+      const host = fakeHost({ defaultEffort: 'off' })
+      apply(host.ctx, { mode, log: false })
+      // 带 sessionId：早先"记上一轮档位"的代码在 decision 为 null 时会崩
+      await host.waterfall(request('你好', { sessionId: 's1' }))
+      if (mode === 'off') {
+        assert.equal((await host.read()).enabled, false)
+      }
+    }
+    // disabled / foreign / error 三条路径都不该炸
+    const host = fakeHost({ defaultEffort: 'off' })
+    apply(host.ctx, { mode: 'off', log: false })
+    await host.waterfall(request('你好', { sessionId: 's2', purpose: 'session-title' }))
+    await host.waterfall(request('你好', { sessionId: 's3' }))
+  })
+})
+
 test('装配：关闭档位（mode=off）时不改档位，但虚拟档位仍被翻译掉', async () => {
   await withTempHome(async () => {
     const host = fakeHost({ defaultEffort: 'off' })
@@ -669,4 +688,61 @@ test('DOM 稳定性：点 Auto 后连续触发观察者 200 次，状态收敛�
   assert.equal(dom.effortText(), 'Auto')
   assert.equal(dom.nodes.auto.getAttribute('aria-checked'), 'true')
   assert.equal(dom.nodes.high.getAttribute('aria-checked'), 'false')
+})
+
+// ---------------------------------------------------------------------------
+// 上下文继承：装配层（会话记忆是否真的接上）
+// ---------------------------------------------------------------------------
+
+test('装配：任务进行中时，含糊短追问按上一轮档位走；新会话不继承', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'off' })
+    apply(host.ctx, { mode: 'auto', log: false })
+    const effortSeen = () => host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)?.effort
+
+    // 第一轮：重活 → max
+    await host.waterfall(request('审计这 12 个模块的架构、安全、性能，逐条给根因与修复，必须详尽完整，另外还要给出回归测试与上线清单', { sessionId: 'work' }))
+    assert.equal(effortSeen(), 'max')
+
+    // 第二轮：含糊短追问 → 继承 max（而不是掉到 low）
+    await host.waterfall(request('把它改成流式', { sessionId: 'work' }))
+    assert.equal(effortSeen(), 'max', '短追问必须继承任务的档位')
+
+    // 另一条会话同样的话：没有"正在进行的任务"，不继承
+    await host.waterfall(request('把它改成流式', { sessionId: 'fresh' }))
+    assert.notEqual(effortSeen(), 'max', '新会话不该继承别的会话的档位')
+
+    // 收尾：任务进行中也不该被拉高
+    await host.waterfall(request('谢谢', { sessionId: 'work' }))
+    assert.equal(effortSeen(), 'off', `收尾应降下来，实际 ${effortSeen()}`)
+
+    const decisions = (await host.read(`${ROUTE_PATH}?decisions=1`)).decisions
+    const inherited = decisions.filter((row) => row.inherited === true)
+    assert.equal(inherited.length, 1, `只应有一次继承：${JSON.stringify(decisions)}`)
+    assert.equal(inherited[0].chosen, null)
+    assert.equal(inherited[0].tier, 'max')
+  })
+})
+
+test('装配：续跑请求不更新"上一轮档位"（沿用本任务档位）', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'off' })
+    apply(host.ctx, { mode: 'auto', log: false })
+    await host.waterfall(request('审计这 12 个模块，必须详尽完整，逐条给根因与修复，另外还要给出回归测试与上线清单', { sessionId: 'w' }))
+    // 续跑（末尾是工具结果）不应把档位改成续跑分支的 null
+    await host.waterfall(Object.freeze({
+      provider: 'deepseek',
+      model: 'deepseek-flash',
+      sessionId: 'w',
+      reasoningEffort: 'auto',
+      messages: Object.freeze([
+        Object.freeze({ role: 'user', content: '帮我改这个函数' }),
+        Object.freeze({ role: 'tool', content: 'done', toolCallId: 'c1' }),
+      ]),
+    }))
+    // 之后再来一句含糊短追问，仍应继承 max
+    await host.waterfall(request('这个再快一点', { sessionId: 'w' }))
+    const last = host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)
+    assert.equal(last.effort, 'max', `续跑后仍应继承 max，实际 ${last.effort}`)
+  })
 })
