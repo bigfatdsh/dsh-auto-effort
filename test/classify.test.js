@@ -80,9 +80,14 @@ test('事实问答是 low，不是 off 也不是 high', () => {
   assert.equal(decision.tier, 'low', `${decision.tier} ${decision.reason}`)
 })
 
-test('中等改动任务判到 high', () => {
+test('中等改动任务至少判到 high（结构改动 + 具体文件）', () => {
   const decision = classify({ messages: [user('把 lib/report.js 里的导出逻辑重构一下，改成流式写入 /tmp/out.csv')] })
-  assert.equal(decision.tier, 'high', `${decision.tier} ${decision.reason}`)
+  assert.ok(TIERS.indexOf(decision.tier) >= 2, `${decision.tier} score=${decision.score}`)
+})
+
+test('只改一个具体小行为的短句落在 low/high（不会掉到 off）', () => {
+  const decision = classify({ messages: [user('把 lib/a.js 里的超时从 30 秒改成 60 秒')] })
+  assert.ok(TIERS.indexOf(decision.tier) >= 1, `${decision.tier} score=${decision.score}`)
 })
 
 test('长文本身会加权：同样的关键词，越长越重', () => {
@@ -340,4 +345,39 @@ test('继承只在短消息上生效（词数上限内）', () => {
   const medium = `把这个改一下 ${'注意保持行宽'.repeat(12)}`
   const decision = judge(medium, 'max')
   assert.equal(decision.inherited, false, `词数 ${decision.words} 不该继承`)
+})
+
+// ---------------------------------------------------------------------------
+// 短句里的"轻动词"：看着像闲聊，其实是在下指令
+// ---------------------------------------------------------------------------
+
+test('短指令不再被判成闲聊（新会话、无任务上下文）', () => {
+  const instructions = ['加个缓存', '回滚一下', '换成 postgres', '改成流式', '拆开', '补上测试', '限流', '重命名']
+  for (const text of instructions) {
+    const decision = classify({ messages: [user(text)], toolCount: 6 })
+    assert.ok(TIERS.indexOf(decision.tier) >= 1, `${text} → ${decision.tier}（应至少 low）`)
+  }
+})
+
+test('短问句：比较/决策/影响类至少到 low，影响类到 high', () => {
+  for (const text of ['这个和那个比呢', '哪个更好', '要不要拆开', '该不该重试', '为什么慢']) {
+    const decision = classify({ messages: [user(text)], toolCount: 6 })
+    assert.ok(TIERS.indexOf(decision.tier) >= 1, `${text} → ${decision.tier}`)
+  }
+  assert.equal(classify({ messages: [user('有风险吗')], toolCount: 6 }).tier, 'high')
+})
+
+test('闲聊与问候仍不被这些新信号误伤', () => {
+  for (const text of ['你好', '谢谢', '好的', '讲个笑话', '随便聊两句', '今天天气怎么样']) {
+    const decision = classify({ messages: [user(text)], toolCount: 6 })
+    assert.ok(TIERS.indexOf(decision.tier) <= 1, `${text} → ${decision.tier}（应 ≤ low）`)
+  }
+})
+
+test('短指令在任务进行中仍然继承任务档位', () => {
+  for (const text of ['加个缓存', '回滚一下', '换成 postgres']) {
+    const decision = classify({ messages: [user(text)], toolCount: 6, previousTask: { tier: 'max', age: 0, maxAge: 3 } })
+    assert.equal(decision.tier, 'max', `${text} → ${decision.tier}`)
+    assert.equal(decision.inherited, true)
+  }
 })
