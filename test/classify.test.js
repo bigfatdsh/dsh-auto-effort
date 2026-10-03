@@ -211,14 +211,34 @@ test('clampEffort：effortFloor=observed 时以请求上已有的强度为下界
   assert.equal(clampEffort({ tier: 'off', efforts, observedEffort: 'max', effortFloor: 'off' }), 'off')
 })
 
-test('clampEffort：adapter-default 下界同时尊重用户选过的值（取两者更强）', () => {
+test('clampEffort：手选的真实档位原样返回，任何边界都不改写它', () => {
   const efforts = ['off', 'low', 'high', 'max']
-  // 模型默认 low，但用户选过 max → 下界是 max。
-  assert.equal(clampEffort({ tier: 'low', efforts, defaultEffort: 'low', observedEffort: 'max', effortFloor: 'adapter-default' }), 'max')
-  // 模型默认 max，用户选过 low → 下界仍是 max（模型默认更强）。
-  assert.equal(clampEffort({ tier: 'low', efforts, defaultEffort: 'max', observedEffort: 'low', effortFloor: 'adapter-default' }), 'max')
-  // 上界默认不存在：判定要 max 时不会被"模型默认 low"压回来。
+  for (const picked of efforts) {
+    for (const floor of ['observed', 'adapter-default', undefined]) {
+      for (const ceiling of ['max', 'adapter-default', 'off', undefined]) {
+        assert.equal(
+          clampEffort({ tier: 'max', efforts, defaultEffort: 'high', observedEffort: picked, effortFloor: floor, effortCeiling: ceiling }),
+          picked,
+          `picked=${picked} floor=${floor} ceiling=${ceiling}`,
+        )
+      }
+    }
+  }
+})
+
+test('clampEffort：adapter-default 下界只作用于判定值（没有手选值时）', () => {
+  const efforts = ['off', 'low', 'high', 'max']
+  // 判定值 low，模型默认 max + 下界 adapter-default → 抬到 max。
+  assert.equal(clampEffort({ tier: 'low', efforts, defaultEffort: 'max', effortFloor: 'adapter-default' }), 'max')
+  // 判定值 max，模型默认 low → 下界 low 不压它。
+  assert.equal(clampEffort({ tier: 'max', efforts, defaultEffort: 'low', effortFloor: 'adapter-default' }), 'max')
+  // 上界不存在时不会被模型默认压回来。
   assert.equal(clampEffort({ tier: 'max', efforts, defaultEffort: 'low' }), 'max')
+})
+
+test('clampEffort：only effortFloor=off 才允许改写手选值', () => {
+  const efforts = ['off', 'low', 'high', 'max']
+  assert.equal(clampEffort({ tier: 'low', efforts, defaultEffort: 'high', observedEffort: 'max', effortFloor: 'off' }), 'low')
 })
 
 test('clampEffort：模型没有默认档时该下界不生效，判定自由', () => {
