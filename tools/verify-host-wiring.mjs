@@ -18,6 +18,24 @@ import { join } from 'node:path'
 import { ROUTE_PATH, apply } from '../lib/index.js'
 
 
+/**
+ * 直接问一次插件路由并取回 JSON。
+ *
+ * @param {object} entry - `webServer.register` 收到的路由。
+ * @param {string} url - 带查询串的路径。
+ * @returns {Promise<object>} 响应体。
+ */
+async function readRoute(entry, url) {
+  const collected = []
+  await entry.handler({ method: 'GET', url }, {
+    writeHead() {},
+    end(body) {
+      collected.push(JSON.parse(body.toString('utf8')))
+    },
+  })
+  return collected[collected.length - 1]
+}
+
 /** 一份冻结的请求，形状与 dsh-agent-loop 交给瀑布的一致。 */
 function frozenRequest(text, extra = {}) {
   return Object.freeze({
@@ -221,6 +239,40 @@ try {
 
   console.log('host wiring OK')
   console.log(host.logs.filter((line) => line.startsWith('auto-effort:')).join('\n'))
+  // 7b) 关键行为：选 auto 时判定接管；选真实档位（high）时一个字节都不改。
+  //     用同一个实例既发请求又读流水——流水是每个插件实例自己的环形缓冲。
+  const seenEffort = []
+  const host3 = fakeHost({
+    resolveModelInfo: async () => ({ reasoning: { efforts: ['off', 'low', 'high', 'max'], defaultEffort: 'off' } }),
+  })
+  host3.services.llm.stream = (options) => {
+    seenEffort.push(options.reasoningEffort ?? null)
+    return (async function* chunks() {
+      yield { type: 'finish', kind: 'completed' }
+    })()
+  }
+  apply(host3.ctx, { mode: 'auto', log: false })
+  const autoReq = Object.freeze({ provider: 'deepseek', model: 'deepseek-flash', sessionId: 's1', reasoningEffort: 'auto', messages: Object.freeze([Object.freeze({ role: 'user', content: '你好' })]) })
+  const manualReq = Object.freeze({ provider: 'deepseek', model: 'deepseek-flash', sessionId: 's2', reasoningEffort: 'high', messages: Object.freeze([Object.freeze({ role: 'user', content: '你好' })]) })
+  await host3.waterfall(autoReq)
+  await host3.waterfall(manualReq)
+
+  assert.equal(autoReq.reasoningEffort, 'auto', '选 auto 时请求对象必须原样保留 auto（界面靠它回显）')
+  assert.equal(seenEffort[0], 'off', `选 auto 时必须由判定接管（实际 ${seenEffort[0]}）`)
+  assert.equal(seenEffort[1], 'high', `选 high 时必须原样下发（实际 ${seenEffort[1]}）`)
+
+  const route3 = host3.routes.find((entry) => entry.path === ROUTE_PATH)
+  const decisions = (await readRoute(route3, '/dsh-auto-effort?decisions=1')).decisions
+  const autoRow = decisions.find((row) => row.chosen === 'auto')
+  const manualRow = decisions.find((row) => row.chosen === 'high')
+  assert.ok(autoRow !== undefined && autoRow.action === 'applied', `auto 应记为 applied：${JSON.stringify(autoRow)}`)
+  // 手选值是"明确指令"：判定要么直接让位（pinned），要么算出来正好等于它（unchanged）。
+  assert.ok(
+    manualRow !== undefined && (manualRow.action === 'pinned' || manualRow.action === 'unchanged'),
+    `high 必须让位或原样：${JSON.stringify(manualRow)}`,
+  )
+  assert.equal(manualRow.effort, 'high', `high 必须保持不变（实际 ${manualRow.effort}）`)
+
 } finally {
   await rm(home, { recursive: true, force: true })
   delete process.env.DSH_HOME
