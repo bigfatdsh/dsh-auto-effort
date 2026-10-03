@@ -88,4 +88,14 @@ const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''
 const requires = [...code.matchAll(/require\('([^']+)'\)/g)].map((match) => match[1])
 assert.deepEqual([...new Set(requires)], ['react'], `bundle 只能 require react，实际：${requires.join(', ')}`)
 
+// 6) 同理禁止 import/相对导入：客户端只服务包根目录下的单文件 bundle
+//    （`client.<name>.js`），`./other.js` 会 404 —— 症状和上面一样，是整个页面打不开。
+assert.doesNotMatch(code, /^\s*import\s/m, 'bundle 不能有 import 语句')
+assert.doesNotMatch(code, /from\s+'\.\//, 'bundle 不能相对导入兄弟文件')
+
+// 7) 菜单标记必须真的内联在这个文件里（拆出去就只能靠相对导入，见上一条）。
+for (const fn of ['findAutoOption', 'readSelected', 'syncEffortMenu']) {
+  assert.match(code, new RegExp(`function ${fn}\\(`), `bundle 缺少内联函数 ${fn}`)
+}
+
 console.log('client bundle OK:', pkg.name, '→', clientExport)
