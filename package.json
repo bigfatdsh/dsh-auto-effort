@@ -1,0 +1,56 @@
+{
+  "name": "dsh-auto-effort",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "推理等级 auto：每次请求按任务轻重自动选该模型支持的推理强度（off/low/high/max），简单任务不再白烧思考 token，难任务自动多想；输入框下方有独立的三态开关，默认自动。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "reasoning",
+    "reasoning-effort",
+    "thinking",
+    "auto",
+    "token"
+  ],
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/classify.js",
+    "lib/request.js",
+    "lib/efforts.js",
+    "lib/schema.js",
+    "lib/state.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "meta": {
+    "title": "推理等级 Auto Effort",
+    "description": "在请求发出前按任务轻重判定推理档位，落成该模型真正支持的 effort；判不出就停在原样，续跑不中途改口径。默认自动，可切成「仅未手动选择时生效」或完全关闭。"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node --test test/classify.test.js test/request.test.js test/plugin.test.js test/client.test.js",
+    "verify:client": "node tools/verify-client-bundle.mjs",
+    "verify": "node tools/verify-host-wiring.mjs && node tools/verify-client-bundle.mjs"
+  }
+}
