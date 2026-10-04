@@ -47,12 +47,19 @@ test('依赖声明：llm 与 webServer 都是硬依赖（实测 ctx.get 取不�
   assert.deepEqual(inject, ['llm', 'webServer', 'systemPrompt'], 'systemPrompt 是精简化段落的注入面')
 })
 
-test('配置校验：虚拟档位的 id 与显示名有默认值', () => {
+test('配置校验：虚拟档位不再是配置项（它是内部常量）', async () => {
+  const { Config } = await import('../lib/schema.js')
   const parsed = Config['~standard'].validate({})
-  assert.equal(parsed.value.effortId, 'auto')
-  assert.equal(parsed.value.effortName, 'Auto')
+  assert.equal(parsed.issues, undefined, '空配置必须能通过校验')
+  // 这三个键属于"往模型目录追加 Auto"的年代，已随该能力移除。
+  for (const key of ['effortId', 'effortName', 'effortDescription', 'autoDefault']) {
+    assert.equal(Object.hasOwn(parsed.value, key), false, `${key} 不该再出现在解析结果里`)
+  }
+  // 旧配置里若还留着这三个键，必须**当场报错**（避免"配了不生效"的静默失败）。
+  const noisy = Config['~standard'].validate({ effortId: 'x', mode: 'auto' })
+  assert.ok(Array.isArray(noisy.issues) && noisy.issues.length > 0, '未知键必须被拒绝')
+  assert.match(noisy.issues[0].message, /effortId: unknown option/)
 })
-
 test('配置校验：空配置补全默认值，且默认就是需求指定的 auto', () => {
   const parsed = Config['~standard'].validate({})
   assert.equal(parsed.issues, undefined)
