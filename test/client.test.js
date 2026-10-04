@@ -147,11 +147,18 @@ test('通用协议：端点 404 或返回垃圾时返回 undefined，不抛错',
   assert.equal(await junk.exports.writeSwitch('/x', 'enabled', true), undefined, '写回垃圾不能被当成成功')
 })
 
-test('面板：点图标开，再点关', async () => {
-  // 带状态的小运行时：闭包里的 React 必须是它，组件里的 hooks 才会真的生效。
+/**
+ * 显式的小渲染器：真保存状态、真跑 effect（尊重依赖）、setter 触发的重渲染用**当前**
+ * 渲染函数。React 这三条语义缺一条，面板类测试就会假通过或自激。
+ *
+ * @returns {object} `{ react, reset, latest }`。
+ */
+function createRuntime() {
   const cells = []
   let cursor = 0
-  let render
+  const latest = { render: () => {} }
+  const same = (a, b) =>
+    a === undefined || b === undefined || a.length !== b.length || a.some((v, i) => !Object.is(v, b[i]))
   const react = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useRef: (initial) => {
@@ -159,52 +166,181 @@ test('面板：点图标开，再点关', async () => {
       if (!(index in cells)) cells[index] = { current: initial }
       return cells[index]
     },
-    useEffect: () => {
-      cursor++
-    },
-    useCallback: (fn) => fn,
     useState: (initial) => {
       const index = cursor++
       if (!(index in cells)) cells[index] = initial
-      const set = (next) => {
-        cells[index] = typeof next === 'function' ? next(cells[index]) : next
-        render()
+      return [
+        cells[index],
+        (next) => {
+          const value = typeof next === 'function' ? next(cells[index]) : next
+          if (Object.is(value, cells[index])) return
+          cells[index] = value
+          latest.render()
+        },
+      ]
+    },
+    useCallback: (fn, deps) => {
+      const index = cursor++
+      if (!(index in cells)) cells[index] = { deps: undefined, fn }
+      const cell = cells[index]
+      if (same(deps, cell.deps)) {
+        cell.deps = deps === undefined ? undefined : [...deps]
+        cell.fn = fn
       }
-      return [cells[index], set]
+      return cell.fn
+    },
+    useEffect: (fn, deps) => {
+      const index = cursor++
+      if (!(index in cells)) cells[index] = { deps: undefined, cleanup: undefined }
+      const cell = cells[index]
+      if (!same(deps, cell.deps)) return
+      if (typeof cell.cleanup === 'function') cell.cleanup()
+      cell.deps = deps === undefined ? undefined : [...deps]
+      const cleanup = fn()
+      cell.cleanup = typeof cleanup === 'function' ? cleanup : undefined
     },
   }
+  return { react, latest, reset: () => { cursor = 0 } }
+}
 
-  const { exports } = await load({ react })
+/**
+ * 装载 + 注册组件，给出"渲染一次"。
+ *
+ * @param {object} [options] - `{ fetch }` 替身。
+ * @returns {Promise<object>} `{ render, state, exports }`。
+ */
+async function mountPanel(options = {}) {
+  const runtime = createRuntime()
+  const loaded = await load({ react: runtime.react, fetch: options.fetch })
   const registry = []
-  exports.apply({
+  loaded.exports.apply({
     slots: {
       inject: (_name, fn) => fn(),
-      register: (options, component) => {
-        registry.push({ options, component })
+      register: (_slotOptions, component) => {
+        registry.push(component)
         return () => {}
       },
     },
   })
-  assert.equal(registry.length, 1)
-  const component = registry[0].component
-
-  let tree
-  render = () => {
-    cursor = 0
-    tree = component({})
+  assert.equal(registry.length, 1, '应注册一个组件')
+  const state = { tree: undefined }
+  function render() {
+    runtime.latest.render = render
+    runtime.reset()
+    state.tree = registry[0]({})
   }
   render()
+  return { render, state, exports: loaded.exports }
+}
 
-  const icon = tree.children[0]
-  assert.equal(icon.props['data-dsh-opt-icon'], '', '图标按钮要在')
-  assert.equal(icon.props['aria-expanded'], 'false', '初始是关闭的')
-  assert.equal(tree.children[1], null, '初始不渲染面板')
+test('面板：点图标开，再点关', async () => {
+  const { render, state } = await mountPanel()
+  render()
+  const icon = () => state.tree.children[0]
+  assert.equal(icon().props['data-dsh-opt-icon'], '', '图标按钮要在')
+  assert.equal(icon().props['aria-expanded'], 'false', '初始关闭')
+  assert.equal(state.tree.children[1], null, '初始不渲染面板')
 
-  icon.props.onClick()
-  assert.equal(tree.children[0].props['aria-expanded'], 'true', '点一下要打开')
-  assert.equal(tree.children[1].props['data-dsh-opt-panel'], '', '点一下要渲染面板')
+  icon().props.onClick()
+  assert.equal(icon().props['aria-expanded'], 'true', '点一下要打开')
+  assert.equal(state.tree.children[1].props['data-dsh-opt-panel'], '', '点一下要渲染面板')
 
-  tree.children[0].props.onClick()
-  assert.equal(tree.children[0].props['aria-expanded'], 'false', '再点一下要关闭')
-  assert.equal(tree.children[1], null, '再点一下要收起面板')
+  icon().props.onClick()
+  assert.equal(icon().props['aria-expanded'], 'false', '再点一下要关闭')
+  assert.equal(state.tree.children[1], null, '再点一下要收起面板')
+})
+
+test('回归：armed 时打开面板不自激（请求与渲染次数都有界）', async () => {
+  // "开 auto 就卡死"的现场在这里被钉住：打开面板 → 读登记表 → 读端点。
+  // 任何一步重复触发都会让这两个计数失控。
+  let fetchCalls = 0
+  const { render, state } = await mountPanel({
+    fetch: async (url) => {
+      fetchCalls += 1
+      if (fetchCalls > 30) throw new Error(`请求失控：已发出 ${fetchCalls} 次`)
+      if (String(url).includes('switches=1')) {
+        return {
+          ok: true,
+          json: async () => ({
+            switches: [
+              { id: 'auto', label: { zh: '自动化推理等级' }, hint: { zh: 'a' }, endpoint: '/dsh-auto-effort', field: 'enabled' },
+              { id: 'concise', label: { zh: '精简化输出' }, hint: { zh: 'c' }, endpoint: '/dsh-auto-effort', field: 'concise' },
+            ],
+          }),
+        }
+      }
+      return { ok: true, json: async () => ({ enabled: true, concise: true }) }
+    },
+  })
+  render()
+  state.tree.children[0].props.onClick()
+  for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve))
+  render()
+
+  const panel = state.tree.children[1]
+  assert.ok(panel !== null, '面板要打开')
+  const rows = panel.children.flat().filter((child) => child?.props?.['data-dsh-opt-row'] === '')
+  assert.equal(rows.length, 2, '两个开关都要画出来')
+  assert.equal(rows.every((row) => row.props['aria-checked'] === 'true'), true, '都读成开启')
+  // 同端点只请求一次 + 一次登记表 = 2 次；给点余量但不许失控。
+  assert.ok(fetchCalls <= 4, `请求次数应有界，实际 ${fetchCalls}`)
+})
+
+test('面板：登记表两项都映射成开关行，同端点不同字段各自取到值', async () => {
+  const { render, state } = await mountPanel({
+    fetch: async (url) => {
+      if (String(url).includes('switches=1')) {
+        return {
+          ok: true,
+          json: async () => ({
+            switches: [
+              { id: 'auto', label: { zh: '自动化推理等级' }, hint: { zh: 'a' }, endpoint: '/dsh-auto-effort', field: 'enabled' },
+              { id: 'concise', label: { zh: '精简化输出' }, hint: { zh: 'c' }, endpoint: '/dsh-auto-effort', field: 'concise' },
+            ],
+          }),
+        }
+      }
+      return { ok: true, json: async () => ({ enabled: true, concise: false }) }
+    },
+  })
+  render()
+  state.tree.children[0].props.onClick()
+  for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve))
+  render()
+  const rows = state.tree.children[1].children.flat().filter((child) => child?.props?.['data-dsh-opt-row'] === '')
+  assert.equal(rows.length, 2, `两个开关都要画出来，实际 ${rows.length}`)
+  assert.equal(rows[0].props['aria-checked'], 'true', 'auto 读到 true')
+  assert.equal(rows[1].props['aria-checked'], 'false', 'concise 读到 false（同端点不同字段）')
+})
+
+test('面板：点某一行会写回后端，并用返回值更新显示', async () => {
+  const writes = []
+  const { render, state } = await mountPanel({
+    fetch: async (url, init) => {
+      if (String(url).includes('switches=1')) {
+        return {
+          ok: true,
+          json: async () => ({
+            switches: [{ id: 'auto', label: { zh: '自动化推理等级' }, hint: { zh: 'a' }, endpoint: '/dsh-auto-effort', field: 'enabled' }],
+          }),
+        }
+      }
+      if (init?.method === 'POST') {
+        writes.push(JSON.parse(String(init.body)))
+        return { ok: true, json: async () => ({ enabled: true }) }
+      }
+      return { ok: true, json: async () => ({ enabled: false }) }
+    },
+  })
+  render()
+  state.tree.children[0].props.onClick()
+  for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve))
+  render()
+  const row = () => state.tree.children[1].children.flat().find((child) => child?.props?.['data-dsh-opt-row'] === '')
+  assert.equal(row().props['aria-checked'], 'false', '初始关闭')
+
+  row().props.onClick()
+  for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(writes, [{ enabled: true }], `应写回 {enabled:true}，实际 ${JSON.stringify(writes)}`)
+  assert.equal(row().props['aria-checked'], 'true', '显示要跟着后端返回值更新')
 })
