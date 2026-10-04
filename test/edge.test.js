@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -24,6 +24,7 @@ import {
   withoutVirtualEffort,
 } from '../lib/index.js'
 import { applyTier, decideRequest } from '../lib/request.js'
+import { ToggleState } from '../lib/state.js'
 import { CLASSIFY_BUDGET_CHARS, classify, clampEffort, normalizeEfforts } from '../lib/classify.js'
 
 const LEVELS = ['off', 'low', 'high', 'max']
@@ -115,7 +116,24 @@ function fakeHost(options = {}) {
     return collected[collected.length - 1]
   }
 
-  return { ctx, llm, services, adapterCalls, logs, routes, waterfall, route, read, state }
+  /** POST 一次（浏览器半边通知宿主"选了 auto"）。 */
+  const post = async (body) => {
+    const collected = []
+    const request = (async function* chunks() {
+      yield Buffer.from(JSON.stringify(body), 'utf8')
+    })()
+    request.method = 'POST'
+    request.url = ROUTE_PATH
+    await route().handler(request, {
+      writeHead() {},
+      end(payload) {
+        collected.push(JSON.parse(payload.toString('utf8')))
+      },
+    })
+    return collected[collected.length - 1]
+  }
+
+  return { ctx, llm, services, adapterCalls, logs, routes, waterfall, route, read, post, state }
 }
 
 /**
@@ -841,5 +859,49 @@ test('装配：选 auto 时仍然正常判定（保护只针对手选值）', as
     assert.equal(host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1).effort, 'off')
     await host.waterfall(request('全面审查这 8 个模块，必须零错误，不能遗漏任何一处。第一步建清单，第二步核对，第三步修复。', { sessionId: 's2', reasoningEffort: 'auto' }))
     assert.equal(host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1).effort, 'max')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// armed：浏览器选中 auto 时，判定必须接管（不依赖会话落盘）
+// ---------------------------------------------------------------------------
+
+test('装配：armed 时请求带的真实档位不再受保护，判定接管', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'high' })
+    const { state } = apply(host.ctx, { mode: 'auto', log: false })
+    const lastEffort = () => host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)?.effort
+
+    // 未 armed：请求带 high → 原样放行（手选保护）
+    await host.waterfall(request('你好', { sessionId: 's1', reasoningEffort: 'high' }))
+    assert.equal(lastEffort(), 'high')
+
+    // armed：同一个请求必须被判成 off（问候），因为浏览器选的是 auto
+    const toggled = await host.post({ auto: true })
+    assert.equal(toggled.auto, true)
+    await host.waterfall(request('你好', { sessionId: 's2', reasoningEffort: 'high' }))
+    assert.equal(lastEffort(), 'off', `armed 后应交给判定，实际 ${lastEffort()}`)
+
+    // armed 状态下重活仍然到 max
+    await host.waterfall(request('全面审查这 8 个模块的架构、安全与性能，必须零错误，不能遗漏任何一处。第一步建清单，第二步核对，第三步修复。', { sessionId: 's3', reasoningEffort: 'high' }))
+    assert.equal(lastEffort(), 'max')
+
+    // 关闭 armed：回到手选保护
+    await host.post({ auto: false })
+    await host.waterfall(request('你好', { sessionId: 's4', reasoningEffort: 'high' }))
+    assert.equal(lastEffort(), 'high', '取消 auto 后手选值必须恢复原样')
+  })
+})
+
+test('装配：armed 状态写盘、可按 DSH_HOME 恢复', async () => {
+  await withTempHome(async (home) => {
+    const host = fakeHost()
+    const { state } = apply(host.ctx, { mode: 'auto', log: false })
+    state.setArmed(true)
+    const raw = await readFile(join(home, 'auto-effort.json'), 'utf8')
+    assert.equal(JSON.parse(raw).armed, true, `状态文件应含 armed=true：${raw}`)
+    const restored = new ToggleState({ initial: 'auto', file: join(home, 'auto-effort.json') })
+    assert.equal(await restored.load(), true)
+    assert.equal(restored.getArmed(), true, '重启后应恢复 armed')
   })
 })
