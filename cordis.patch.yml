@@ -24,8 +24,10 @@
     - id: auto-effort
       name: 'dsh-auto-effort'
       config:
+        # 默认关闭：先用它做 A/B 验证（关掉后若仍卡死，就与本插件无关）。
+        # 「优化」面板里点一下即可开回来，不需要改这个文件。
         mode: auto
-        enabled: true
+        enabled: false
         persist: true
         minTier: 'off'
         maxTier: max
