@@ -93,9 +93,11 @@ assert.deepEqual([...new Set(requires)], ['react'], `bundle 只能 require react
 assert.doesNotMatch(code, /^\s*import\s/m, 'bundle 不能有 import 语句')
 assert.doesNotMatch(code, /from\s+'\.\//, 'bundle 不能相对导入兄弟文件')
 
-// 7) 菜单标记必须真的内联在这个文件里（拆出去就只能靠相对导入，见上一条）。
-for (const fn of ['findAutoOption', 'readSelected', 'syncEffortMenu']) {
-  assert.match(code, new RegExp(`function ${fn}\\(`), `bundle 缺少内联函数 ${fn}`)
-}
+// 7) 契约：面板注册到输入栏右侧插槽，样式与图标内联；不再碰内置选择器的 DOM
+//    （上一版靠改它的触发器和勾，宿主一改就断，而且会和别的开关抢位置）。
+assert.match(code, /'conversation\.input\.right'/, 'bundle 必须注册到输入栏右侧插槽')
+assert.match(code, /\[data-dsh-opt-icon\]/, 'bundle 样式里要有优化图标')
+assert.match(code, /data-dsh-opt-panel/, 'bundle 样式里要有开关面板')
+assert.doesNotMatch(code, /data-dsh-auto-effort/, 'bundle 不能再动内置选择器的 DOM')
 
 console.log('client bundle OK:', pkg.name, '→', clientExport)
