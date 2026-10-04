@@ -24,7 +24,6 @@ import {
   isVirtualEffort,
   name,
   throughAuto,
-  withAutoEffort,
   withoutVirtualEffort,
 } from '../lib/index.js'
 
@@ -52,7 +51,6 @@ test('配置校验：虚拟档位的 id 与显示名有默认值', () => {
   const parsed = Config['~standard'].validate({})
   assert.equal(parsed.value.effortId, 'auto')
   assert.equal(parsed.value.effortName, 'Auto')
-  assert.equal(parsed.value.autoDefault, false)
 })
 
 test('配置校验：空配置补全默认值，且默认就是需求指定的 auto', () => {
@@ -219,27 +217,6 @@ test('三种运行档只由 Host 持有（浏览器半边不再显示档位）',
   assert.deepEqual([...RUN_MODES], ['auto', 'pin', 'off'])
   // 浏览器半边只管"点过 Auto"这个显示标记，不该再出现 run-mode 的取值。
   assert.doesNotMatch(clientSource, /'pin'/)
-})
-
-test('模型目录里追加 Auto 档位，不改任何模型能力', () => {
-  const info = { provider: 'deepseek', id: 'deepseek-flash', name: 'Flash', reasoning: { efforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }], defaultEffort: 'high' } }
-  const config = { effortId: 'auto', effortName: 'Auto', effortDescription: 'auto', autoDefault: false }
-  const extended = withAutoEffort(info, config)
-  assert.deepEqual(extended.reasoning.efforts.map((level) => level.id), ['off', 'high', 'auto'])
-  assert.equal(extended.reasoning.defaultEffort, 'high')
-  // 入参不被修改
-  assert.deepEqual(info.reasoning.efforts.map((level) => level.id), ['off', 'high'])
-  // 重复调用幂等
-  assert.deepEqual(withAutoEffort(extended, config).reasoning.efforts.map((level) => level.id), ['off', 'high', 'auto'])
-  // 没有推理能力的模型不追加：不该出现一个没有意义的"自动"
-  assert.equal(withAutoEffort({ provider: 'x', id: 'y', name: 'Y' }, config).reasoning, undefined)
-  assert.equal(withAutoEffort(undefined, config), undefined)
-})
-
-test('autoDefault 打开时把 Auto 设成模型默认档', () => {
-  const info = { reasoning: { efforts: [{ id: 'off', name: 'Off' }] } }
-  const extended = withAutoEffort(info, { effortId: 'auto', effortName: 'Auto', autoDefault: true })
-  assert.equal(extended.reasoning.defaultEffort, 'auto')
 })
 
 test('适配器只看到真实档位，调用方的对象一个字节都不改', () => {
