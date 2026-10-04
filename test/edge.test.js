@@ -573,3 +573,19 @@ test('回归：连续 200 次请求不泄漏、不累积（内存与状态都有
     assert.ok(status.stats.applied + status.stats.unchanged + status.stats.skipped >= 200)
   })
 })
+
+test('回归：判定卡住也不会拖住请求（1.5s 硬超时后原样放行）', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'off' })
+    // 让元数据查询永远不返回：判定必须自己超时，请求照常走完。
+    host.llm.resolveModelInfo = () => new Promise(() => {})
+    apply(host.ctx, { mode: 'auto', log: false })
+    const started = Date.now()
+    const chunks = await host.waterfall(request('帮我修一下这个报错', { sessionId: 's1' }))
+    const elapsed = Date.now() - started
+    assert.deepEqual(chunks, ['finish'], '请求必须走完')
+    assert.ok(elapsed < 4000, `不该拖到 ${elapsed}ms`)
+    const seen = host.adapterCalls.find((row) => row.where === 'hostStream')
+    assert.equal(seen.effort, undefined, '超时后原样放行（适配器看到"没带档位"）')
+  })
+})
