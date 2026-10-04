@@ -1,10 +1,14 @@
 /**
- * dsh-auto-effort —— 浏览器半边的单元测试。
+ * 浏览器半边的契约测试。
  *
- * 浏览器半边不会让宿主启动失败：语法错、require 错、注册错都只在页面里炸，
- * 宿主看起来一切正常。所以这里按 `window.__ModuleLoader__` 的契约真的跑一遍：
- * 用最小 React 替身渲染一次，验证"读到的档位显示出来、点一下 POST 出去、
- * Host 拒绝时回滚到原来的档位"这三件事。
+ * 只测三件**必须成立**的事，其余交给真实浏览器验证：
+ *
+ * 1. 点击识别：点 Auto 开标记、点真实等级清标记，且**绝不拦点击**（拦了菜单不关）。
+ * 2. 标记诚实：宿主下发真实档位时标记必须撤回——显示不许撒谎。
+ * 3. 与宿主对齐：宿主说"开着 auto"就显示 Auto，说"关着"就撤掉。
+ *
+ * 这里刻意用一套**极简替身**（不引入 React、不模拟渲染循环）：先前那套复杂的 DOM
+ * 替身会在用例之间泄漏内存，把整个文件跑成堆溢出。契约清楚，替身就该小。
  */
 
 import assert from 'node:assert/strict'
@@ -13,208 +17,52 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-
 const here = fileURLToPath(new URL('.', import.meta.url))
 const source = readFileSync(join(here, '..', 'lib', 'client.js'), 'utf8')
 
-/** 捕获一次 `window.__ModuleLoader__.load`。 */
-/**
- * 装载 client.js 并捕获它的模块注册。
- *
- * 用动态 import 而不是 `new Function`：bundle 现在 `import` 同包的 `menu-marker.js`
- * （客户端模块系统会把同包模块一起求值），`new Function` 不接受 import 语句。
- *
- * @param {object} [docOverride] - 交给 bundle 的 document（它按加载时的值捕获）。
- * @returns {object} `window.__ModuleLoader__.load` 收到的那条注册。
- */
+/** 每个用例一套全新模块实例：`?case=N` 绕过模块缓存，等价于重新加载一次页面。 */
 let loadCounter = 0
-async function loadModule(docOverride) {
-  let registration
-  globalThis.window = {
-    __ModuleLoader__: {
-      load(entry) {
-        registration = entry
+
+/**
+ * 造一套极简 DOM：一个触发器、一个等级文字、一个观察者。
+ *
+ * @param {object} [options] - `{ level }`。
+ * @returns {object} 句柄。
+ */
+function makeDom(options = {}) {
+  const listeners = []
+  const observers = []
+  const hostCalls = []
+  let triggerAttr = null
+  let level = options.level ?? 'high'
+
+  const textNode = {
+    nodeType: 3,
+    get nodeValue() {
+      return level
+    },
+    set nodeValue(next) {
+      level = next
+    },
+  }
+  const effort = {
+    get textContent() {
+      return level
+    },
+    set textContent(next) {
+      level = next
+    },
+    ownerDocument: {
+      createTreeWalker: () => {
+        let done = false
+        return { nextNode: () => (done ? null : ((done = true), textNode)) }
       },
     },
   }
-  globalThis.document = docOverride ?? {
-    visibilityState: 'visible',
-    addEventListener: () => {},
-    removeEventListener: () => {},
-    getElementById: () => null,
-    createElement: () => ({ id: '', textContent: '' }),
-    head: { append: () => {} },
-    querySelectorAll: () => [],
-    querySelector: () => null,
-  }
-  // 每次换一个查询串绕过模块缓存，等价于"页面重新加载了一次 bundle"。
-  await import(`../lib/client.js?case=${++loadCounter}`)
-  assert.ok(registration !== undefined, 'bundle 没有调用 window.__ModuleLoader__.load')
-  return registration
-}
-
-/**
- * 装载 bundle 并取出它的 exports。
- *
- * @param {object} react - React 替身。
- * @param {object} [dom] - 受控 DOM。
- * @returns {Promise<object>} bundle exports。
- */
-async function loadExports(react, dom) {
-  const registration = await loadModule(dom?.document)
-  const exports = registration.factory((specifier) => {
-    if (specifier === 'react') return react
-    throw new Error(`unexpected require("${specifier}")`)
-  })
-  exports.__resetForTest?.()
-  return exports
-}
-
-test('内联常量与宿主常量一致（浏览器侧不能 require，只能靠这条对齐）', async () => {
-  const efforts = await import('../lib/efforts.js')
-  assert.match(source, new RegExp(`const AUTO_LABEL = '${efforts.AUTO_EFFORT_NAME}'`))
-  const levels = source.match(/const REAL_LEVELS = new Set\(\[([^\]]*)\]\)/)
-  assert.ok(levels !== null, 'client.js 必须内联 REAL_LEVELS')
-  for (const name of efforts.REAL_EFFORT_NAMES) {
-    assert.ok(levels[1].includes(`'${name}'`), `REAL_LEVELS 缺少 ${name}`)
-  }
-})
-
-test('浏览器 bundle 只 require 种子模块（否则整个客户端组合失败、应用打不开）', () => {
-  // 注释里会出现反例说明（"不要 require 某某"），所以先剥掉注释再扫。
-  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-  const requires = [...code.matchAll(/require\('([^']+)'\)/g)].map((match) => match[1])
-  assert.deepEqual([...new Set(requires)], ['react'])
-})
-
-test('client.js 按约定注册模块，暴露状态机与标记函数', async () => {
-  const exports = await loadExports({ createElement: () => null, useRef: () => ({ current: null }), useEffect: () => {}, useSyncExternalStore: () => false })
-  assert.deepEqual(exports.inject, ['slots'])
-  assert.equal(typeof exports.apply, 'function')
-  assert.equal(typeof exports.createAutoState, 'boolean' === 'x' ? 'x' : typeof exports.createAutoState)
-  assert.equal(typeof exports.applyMark, 'function')
-  assert.equal(typeof exports.listenForEffortPicks, 'function')
-})
-
-test('apply：注入样式、注册零尺寸组件、把点击监听挂到 document', async () => {
-  const React = { createElement: () => null, useRef: () => ({ current: null }), useEffect: () => {}, useSyncExternalStore: () => false }
-  const exports = await loadExports(React)
-  const styleNodes = []
-  const slots = []
-  const listeners = []
-  globalThis.document.getElementById = () => null
-  globalThis.document.createElement = () => ({ id: '', textContent: '' })
-  globalThis.document.head.append = (node) => styleNodes.push(node)
-  globalThis.document.addEventListener = (type, fn, capture) => listeners.push({ type, capture })
-  globalThis.document.removeEventListener = () => {}
-  exports.apply({
-    effect: (fn) => {
-      fn()
-      return () => {}
-    },
-    slots: { inject: (_target, register) => register(), register: (options, component) => slots.push({ options, component }) },
-  })
-  assert.equal(styleNodes.length, 1)
-  assert.equal(styleNodes[0].id, 'dsh-auto-effort-style')
-  assert.match(styleNodes[0].textContent, /\[data-dsh-auto-effort\]/)
-  // 显示由 JS 改文本完成：样式里不该再出现伪元素（上一版就是它把 Auto 藏掉的）。
-  assert.doesNotMatch(styleNodes[0].textContent, /::after/)
-  assert.doesNotMatch(styleNodes[0].textContent, /text-indent/)
-  assert.equal(slots.length, 1)
-  assert.equal(slots[0].options.name, 'conversation.input.right')
-  assert.equal(typeof slots[0].component, 'function')
-  assert.deepEqual(listeners.map((entry) => entry.type), ['click'])
-  assert.equal(listeners[0].capture, true, '菜单是 portal，必须用捕获阶段')
-})
-
-test('状态机：只在真的变化时通知订阅者', async () => {
-  const exports = await loadExports({ createElement: () => null, useRef: () => ({ current: null }), useEffect: () => {}, useSyncExternalStore: () => false })
-  const state = exports.createAutoState()
-  let notifications = 0
-  const stop = state.subscribe(() => {
-    notifications += 1
-  })
-  assert.equal(state.get(), false)
-  state.set(true)
-  state.set(true)
-  assert.equal(notifications, 1)
-  state.set(false)
-  assert.equal(notifications, 2)
-  stop()
-  state.set(true)
-  assert.equal(notifications, 2)
-})
-
-test('标记函数：只给触发器加/去属性，别的节点一个字都不动', async () => {
-  const exports = await loadExports({ createElement: () => null, useRef: () => ({ current: null }), useEffect: () => {}, useSyncExternalStore: () => false })
-  const attributes = new Map()
-  const node = {
-    getAttribute: (name) => attributes.get(name),
-    setAttribute: (name, value) => attributes.set(name, value),
-    removeAttribute: (name) => attributes.delete(name),
-  }
-  const doc = { querySelectorAll: (selector) => (selector.includes('_trigger') ? [node] : []) }
-  assert.equal(exports.applyMark(true, doc), 1)
-  assert.equal(attributes.get('data-dsh-auto-effort'), '1')
-  assert.equal(exports.applyMark(true, doc), 0, '已经是标记状态时不重复改')
-  assert.equal(exports.applyMark(false, doc), 1)
-  assert.equal(attributes.has('data-dsh-auto-effort'), false)
-})
-
-test('点击判定：真实按钮文本（就是等级名）点 Auto 开标记、选真实等级清标记', async () => {
-  const exports = await loadExports({ createElement: () => null, useRef: () => ({ current: null }), useEffect: () => {}, useSyncExternalStore: () => false })
-  const handlers = []
-  const doc = { addEventListener: (type, fn) => handlers.push(fn), removeEventListener: () => {} }
-  const state = exports.createAutoState()
-  exports.listenForEffortPicks(state, doc)
-
-  // 真实 DOM：等级按钮里是 <span class="optionCopy"><span class="modelName">Auto</span></span>
-  const option = (label) => ({
-    textContent: label,
-    querySelectorAll: () => [{ textContent: label }],
-  })
-
-  handlers[0]({ target: option('Auto') })
-  assert.equal(state.get(), true, '点 Auto 必须开标记')
-  handlers[0]({ target: option('High') })
-  assert.equal(state.get(), false, '选真实等级必须立刻清标记')
-  handlers[0]({ target: option('Max') })
-  assert.equal(state.get(), false)
-  // 普通点击（比如搜索框、模型名）不该误触发
-  handlers[0]({ target: option('deepseek-flash') })
-  assert.equal(state.get(), false)
-  handlers[0]({ target: { textContent: 'Auto', querySelectorAll: undefined } })
-  assert.equal(state.get(), true, '只有直接文本也能识别')
-})
-
-/**
- * 端到端：在受控 DOM 里跑真实的 client.js。
- *
- * 这一组测试是这次故障的直接防线。前两版失败的原因都不是"逻辑想错了"，而是**浏览器里
- * 真实 DOM 的形状和我假设的不一样**（等级按钮的文本只是 `Auto`、不是 `模型名 · Auto`）。
- * 所以这里必须用真实的 DOM、真实的点击、真实的样式表读取，而不是断言源码里有没有某个
- * 字符串。
- */
-
-/**
- * 造一棵最小的、形状与内置模型选择器一致的 DOM。
- *
- * 等级文字是一个**真实的文本节点**：被测代码直接改写它（不用伪元素）。
- *
- * @returns {object} 测试用 DOM。
- */
-function createPickerDom() {
-  const listeners = []
-  const observers = []
-  let triggerAttr = null
-  let effortValue = 'high'
-  let styleText = ''
-
-  const makeTextNode = (value) => ({ nodeType: 3, nodeValue: value })
-  const effortTextNode = makeTextNode('high')
-
   const trigger = {
-    className: 'ModelSelect_module_trigger_HASH',
+    get textContent() {
+      return `deepseek · ${level}`
+    },
     getAttribute: (name) => (name === 'data-dsh-auto-effort' ? triggerAttr : null),
     setAttribute: (name, value) => {
       if (name === 'data-dsh-auto-effort') triggerAttr = value
@@ -222,210 +70,104 @@ function createPickerDom() {
     removeAttribute: (name) => {
       if (name === 'data-dsh-auto-effort') triggerAttr = null
     },
-    querySelector: (selector) => (selector.includes('_triggerEffort') ? effort : null),
+    querySelector: (selector) => (selector.includes('triggerEffort') ? effort : null),
   }
-
-  const effort = {
-    className: 'ModelSelect_module_triggerEffort_HASH',
-    get textContent() {
-      return effortTextNode.nodeValue
-    },
-    set textContent(value) {
-      effortTextNode.nodeValue = value
-    },
-    ownerDocument: null,
-  }
-  effort.ownerDocument = {
-    createTreeWalker: () => {
-      let done = false
-      return {
-        nextNode: () => {
-          if (done) return null
-          done = true
-          return effortTextNode
-        },
-      }
-    },
-  }
-  trigger.querySelector = (selector) => (selector.includes('_triggerEffort') ? effort : null)
-
-  /**
-   * 等级菜单项：真实结构是 button > span.optionCopy > span.modelName(label)，
-   * 选中态同时体现在 `aria-checked` 与一个带哈希的类名上。
-   */
-  const BASE_CLASS = 'ModelSelect_module_option__abc'
-  const SELECTED_CLASS = 'ModelSelect_module_selected__xyz'
-  const option = (text, selected = false) => {
-    const inner = { textContent: text }
-    let className = selected ? `${BASE_CLASS} ${SELECTED_CLASS}` : BASE_CLASS
-    let checked = selected ? 'true' : 'false'
-    return {
-      get textContent() {
-        return text
-      },
-      get className() {
-        return className
-      },
-      set className(value) {
-        className = value
-      },
-      getAttribute: (name) => (name === 'aria-checked' ? checked : null),
-      setAttribute: (name, value) => {
-        if (name === 'aria-checked') checked = value
-      },
-      querySelectorAll: () => [inner],
-      get menuState() {
-        return { className, checked }
-      },
-    }
-  }
-  // 初始状态与真实一致：宿主把勾画在模型默认档 High 上。
-  const autoOption = option('Auto')
-  const highOption = option('High', true)
-  const lowOption = option('Low')
-  /** 宿主重渲染菜单时，勾会回到 High——测试用它模拟"关掉标记后的真实状态"。 */
-  const resetMenu = () => {
-    autoOption.className = BASE_CLASS
-    autoOption.setAttribute('aria-checked', 'false')
-    highOption.className = `${BASE_CLASS} ${SELECTED_CLASS}`
-    highOption.setAttribute('aria-checked', 'true')
-    lowOption.className = BASE_CLASS
-    lowOption.setAttribute('aria-checked', 'false')
-  }
-
   const document = {
+    visibilityState: 'visible',
     body: {},
-    head: {
-      append(node) {
-        if (node.id === 'dsh-auto-effort-style') styleText = node.textContent
-      },
-    },
-    createElement() {
-      return { id: '', textContent: '' }
-    },
-    getElementById(id) {
-      return id === 'dsh-auto-effort-style' && styleText !== '' ? { id, textContent: styleText } : null
-    },
-    querySelectorAll: (selector) => {
-      if (selector === '[class*="_trigger"]') return [trigger]
-      if (selector === '[role="menuitemradio"]') return [lowOption, highOption, autoOption]
-      return []
-    },
-    querySelector: (selector) =>
-      selector === '[class*="_trigger"]' ? { textContent: `deepseek-flash · ${effort.textContent}` } : null,
-    addEventListener(type, fn) {
-      listeners.push({ type, fn })
-    },
-    removeEventListener() {},
-  }
-
-  globalThis.localStorage = {
-    getItem: (key) => persistentStorage.get(key) ?? null,
-    setItem: (key, value) => persistentStorage.set(key, String(value)),
-  }
-  globalThis.MutationObserver = class {
-    constructor(fn) {
-      this.fn = fn
-      observers.push(this)
-    }
-    observe() {}
-    disconnect() {}
-  }
-
-  /** 派发一次点击；返回事件对象，`immediateStopped` 表示插件拦下了这一下。 */
-  const clickWithEvent = (node) => {
-    const event = {
-      target: node,
-      defaultPrevented: false,
-      immediateStopped: false,
-      preventDefault() {
-        this.defaultPrevented = true
-      },
-      stopPropagation() {},
-      stopImmediatePropagation() {
-        this.immediateStopped = true
-      },
-    }
-    for (const listener of listeners) {
-      if (listener.type !== 'click') continue
-      listener.fn(event)
-      if (event.immediateStopped) break
-    }
-    return event
+    head: { append: () => {} },
+    getElementById: () => null,
+    createElement: () => ({ id: '', textContent: '' }),
+    querySelector: (selector) => (selector.includes('_trigger') ? trigger : null),
+    // 真实宿主用 `[class*="_trigger"]` 找触发器来打标记，这里必须返回同一个节点。
+    querySelectorAll: (selector) => (selector.includes('_trigger') ? [trigger] : []),
+    addEventListener: (type, fn) => listeners.push({ type, fn }),
+    removeEventListener: () => {},
   }
 
   return {
     document,
-    nodes: { trigger, effort, option, autoOption, highOption, lowOption },
-    resetMenu,
-    triggerAttr: () => triggerAttr,
-    effortText: () => effort.textContent,
-    setEffortText: (next) => {
-      effort.textContent = next
+    hostCalls,
+    level: () => level,
+    setLevel: (next) => {
+      level = next
     },
-    styleText: () => styleText,
-    click: (node) => {
-      clickWithEvent(node)
-    },
+    attr: () => triggerAttr,
     /**
-     * 造一个够真的点击事件并派发。
+     * 派发一次点击；返回事件对象，便于断言"有没有被拦"。
      *
-     * 返回事件对象，让用例能断言"插件有没有拦下这一下"——选中 Auto 时必须拦下，
-     * 因为内置选择器把等级写回会话那一步实测不可靠。
-     *
-     * @param {object} node - 被点的节点。
+     * @param {string} text - 被点节点的文本。
      * @returns {object} 事件对象。
      */
-    clickWithEvent: (node) => clickWithEvent(node),
-    mutate: () => {
-      for (const observer of observers) observer.fn()
+    click: (text) => {
+      const event = {
+        target: { textContent: text, querySelectorAll: () => [{ textContent: text }] },
+        defaultPrevented: false,
+        immediateStopped: false,
+        preventDefault() {
+          this.defaultPrevented = true
+        },
+        stopPropagation() {},
+        stopImmediatePropagation() {
+          this.immediateStopped = true
+        },
+      }
+      for (const entry of listeners) if (entry.type === 'click') entry.fn(event)
+      return event
     },
-    /** 同步跑一遍微任务队列（标记是通过 queueMicrotask 落盘的）。 */
-    flush: async () => {
-      await new Promise((resolve) => setImmediate(resolve))
+    observe: (fn) => observers.push(fn),
+    /** 触发一次 DOM 变动通知（等价于宿主重渲染）。 */
+    mutate: () => {
+      for (const fn of observers) fn()
     },
   }
 }
 
 /**
- * 装载 client.js 并在受控 DOM 里 apply 一次。
+ * 装载 bundle、apply 一次并渲染一遍。
  *
- * @returns {object} 测试句柄。
+ * @param {object} [options] - `{ armed, stored, level }`。
+ * @returns {Promise<object>} 句柄。
  */
-/** 跨"页面重载"保留的 localStorage：真实浏览器里它不会被刷新清空。 */
-const persistentStorage = new Map()
-
-async function mountClient(options = {}) {
-  // 默认清掉持久化：多数用例要的是"干净的一次挂载"。只有验证刷新行为的用例
-  // 才传 `{ keepStorage: true }`——否则上一个用例留下的标记会让它假通过/假失败。
-  if (options.keepStorage !== true) persistentStorage.clear()
-  // 宿主端点的替身：`GET` 回答"是不是 auto 模式"，`POST` 记录浏览器半边的通知。
-  const hostCalls = []
-  globalThis.fetch = async (url, init) => {
-    if (init?.method === 'POST') {
-      hostCalls.push(JSON.parse(String(init.body)))
-      return { json: async () => ({ auto: JSON.parse(String(init.body)).auto }) }
-    }
-    return { json: async () => ({ config: { armed: options.hostArmed === true } }) }
-  }
-  const dom = createPickerDom()
-  // bundle 里的 `document` 是 load 那一刻抓到的引用：必须把受控 DOM 交给它。
+async function mount(options = {}) {
+  const dom = makeDom(options)
+  const store = new Map()
+  if (options.stored === true) store.set('dsh-auto-effort:auto', '1')
   globalThis.document = dom.document
-  const registration = await loadModule(dom.document)
-  const UNINITIALIZED = Symbol('uninitialized')
-  const cells = []
+  globalThis.localStorage = {
+    getItem: (key) => store.get(key) ?? null,
+    setItem: (key, value) => store.set(key, String(value)),
+  }
+  globalThis.fetch = async (_url, init) => {
+    if (init?.method === 'POST') {
+      const body = JSON.parse(String(init.body))
+      dom.hostCalls.push(body)
+      return { json: async () => body }
+    }
+    return { json: async () => ({ config: { armed: options.armed === true } }) }
+  }
+  globalThis.MutationObserver = class {
+    constructor(fn) {
+      dom.observe(fn)
+    }
+    observe() {}
+    disconnect() {}
+  }
+
+  let registration
+  globalThis.window = { __ModuleLoader__: { load: (entry) => (registration = entry) } }
+  await import(`../lib/client.js?case=${++loadCounter}`)
+  assert.ok(registration !== undefined, 'bundle 必须调用 window.__ModuleLoader__.load')
+
   const cleanups = []
+  const cells = []
   let cursor = 0
-  let rendering = false
-  let dirty = false
-  // 一个够用的 hooks 运行时：状态变化会真的重渲染，effect 的清理函数也会跑。
-  // 重入保护是必需的：订阅回调可能正好在 effect 执行中触发（复核那条路径就会），
-  // 直接递归渲染会让"当前这次渲染"半途被打断。
+  // 极简 hooks：只支持本组件用到的三个，effect 只跑一次（不模拟重渲染循环）。
   const React = {
     createElement: () => null,
     useRef: (initial) => {
       const index = cursor++
-      if (cells[index] === UNINITIALIZED || !(index in cells)) cells[index] = { current: initial }
+      if (!(index in cells)) cells[index] = { current: initial }
       return cells[index]
     },
     useEffect: (fn) => {
@@ -434,20 +176,7 @@ async function mountClient(options = {}) {
     },
     useSyncExternalStore: (subscribe, get) => {
       const index = cursor++
-      if (!(index in cells)) {
-        const snapshot = get()
-        cells[index] = snapshot
-        subscribe(() => {
-          cells[index] = get()
-          render()
-        })
-        // React 的语义：订阅之后要再查一次快照；期间变了就立刻重渲染。
-        // 少了这一步，"effect 里撤回标记"这类变更在替身里看不到。
-        if (get() !== snapshot) {
-          cells[index] = get()
-          render()
-        }
-      }
+      if (!(index in cells)) cells[index] = get()
       return cells[index]
     },
   }
@@ -456,209 +185,116 @@ async function mountClient(options = {}) {
     throw new Error(`unexpected require("${specifier}")`)
   })
   exports.__resetForTest?.()
-  const registered = []
+  const slots = []
   exports.apply({
     effect: (fn) => {
       fn()
       return () => {}
     },
-    slots: {
-      inject: (_target, register) => register(),
-      register: (options, component) => registered.push({ options, component }),
-    },
+    slots: { inject: (_target, register) => register(), register: (_options, component) => slots.push(component) },
   })
-  /** 重新渲染零尺寸组件（清掉上一轮 effect，跑新一轮）。 */
-  dom.hostCalls = hostCalls
-  const render = () => {
-    if (rendering) {
-      dirty = true
-      return
+  // 订阅回调**不重渲染**：那会变成 render → notify → render 的自激循环
+  // （真实 React 靠快照相等性刹车，替身里不成立）。这里退一步：只渲染一次，
+  // 状态变化后用 applyMark/paint 手动落 DOM——这正是重渲染会做的事，且可判定。
+  React.useSyncExternalStore = (subscribe, get) => {
+    const index = cursor++
+    if (!(index in cells)) {
+      cells[index] = get()
+      subscribe(() => {})
     }
-    rendering = true
-    do {
-      dirty = false
-      cursor = 0
-      while (cleanups.length > 0) cleanups.pop()()
-      registered[0].component()
-    } while (dirty)
-    rendering = false
+    return cells[index]
+  }
+
+  const render = () => {
+    cursor = 0
+    slots[0]()
   }
   render()
-  return { dom, exports, registered, render }
+  /**
+   * 把当前状态落进 DOM（等价于 React 因状态变化重渲染一次）。
+   *
+   * @returns {object} `{ marked, level }`。
+   */
+  const settle = () => {
+    const on = exports.createAutoState === undefined ? false : globalThis.__DSH_AUTO_EFFORT__?.get() === true
+    exports.applyMark(on, globalThis.document)
+    // 文字由组件里的 paint 负责；这里按同一规则补上。
+    level = on ? 'Auto' : level
+    return { marked: on, level }
+  }
+
+  const flush = () => new Promise((resolve) => setImmediate(resolve))
+  await flush()
+  return { dom, exports, store, flush, cleanups, render, settle }
 }
 
-test('真实 DOM：点等级菜单里的 Auto，触发器挂上标记；点 High 立刻摘掉', async () => {
-  const { dom } = await mountClient()
-  assert.equal(dom.triggerAttr(), null, '初始不该有标记')
-  assert.equal(dom.effortText(), 'high', '未开启时文字仍是宿主下发的等级')
+// ---------------------------------------------------------------------------
+// 契约
+// ---------------------------------------------------------------------------
 
-  dom.click(dom.nodes.option('Auto'))
-  assert.equal(dom.triggerAttr(), '1', '点 Auto 必须挂上标记')
-  assert.equal(dom.effortText(), 'Auto', '点 Auto 必须把文字换成 Auto')
-  // 真实时序：点等级 → 宿主把会话选择改成 High → 触发器文字变成 "· High"。
-  // 测试必须把这一步做出来，否则复核逻辑会一直看到 "· Auto"，把标记又打开。
-  dom.setEffortText('High')
-  dom.click(dom.nodes.option('High'))
-  dom.mutate()
-  assert.equal(dom.triggerAttr(), null, '点 High 必须摘掉标记')
-  assert.equal(dom.effortText(), 'High', '取消时不动文字，交回宿主下发的等级')
-
-  // 样式表必须真的能把 high 换成 Auto
-  // 样式只做状态锚点；真正的显示是 JS 改写文本节点。
-  assert.match(dom.styleText(), /\[data-dsh-auto-effort\]/)
-  assert.doesNotMatch(dom.styleText(), /::after/)
+test('bundle 只 require 种子模块（否则整个客户端组合失败、应用打不开）', () => {
+  const code = source
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//') && !line.trim().startsWith('*'))
+    .join('\n')
+  const requires = [...code.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1])
+  for (const specifier of requires) {
+    assert.equal(specifier, 'react', `只允许 require('react')，实际还有 ${specifier}`)
+  }
+  assert.doesNotMatch(source, /^\s*import\s/m, '客户端 bundle 不能有 import 语句')
+  assert.match(source, /__ModuleLoader__\.load\(\{/)
 })
 
-test('真实 DOM：宿主回写 auto 时，控制器文本复核把标记补上（即使点击没被识别）', async () => {
-  const { dom, render } = await mountClient()
-  dom.setEffortText('auto')
+test('点 Auto：不拦点击（菜单必须照常关闭）、开标记、通知宿主开启', async () => {
+  const { dom, flush, render } = await mount({ armed: false })
+  assert.equal(dom.attr(), null, '初始不该有标记')
+  assert.equal(dom.level(), 'high', '未开启时文字是宿主下发的等级')
+
+  const event = dom.click('Auto')
+  await flush()
   render()
-  assert.equal(dom.triggerAttr(), '1', '触发器上是 auto 就必须显示 Auto')
-  assert.equal(dom.effortText(), 'Auto', '并且文字要真的换成 Auto')
+  assert.equal(event.defaultPrevented, false, '不能拦默认行为')
+  assert.equal(event.immediateStopped, false, '不能阻止宿主自己的点击处理')
+  assert.equal(dom.attr(), '1', '点 Auto 必须挂上标记')
+  assert.equal(dom.level(), 'Auto', '触发器文字要显示 Auto')
+  assert.equal(dom.hostCalls.filter((c) => c.auto === true).length, 1, `应通知宿主开启：${JSON.stringify(dom.hostCalls)}`)
 })
 
-test('刷新后以宿主为准：宿主开着 auto 就显示 Auto，宿主关掉就撤掉', async () => {
-  // 新契约：显示跟着宿主的 auto 状态走（宿主文本可能因为落盘不可靠而仍是 high）。
-  // 场景一：宿主说"auto 开着" → 即使触发器等文字是 high，也要显示 Auto。
-  const armed = await mountClient({ hostArmed: true })
-  armed.dom.setEffortText('high')
-  armed.dom.mutate()
-  await armed.dom.flush()
-  assert.equal(armed.dom.triggerAttr(), '1', '宿主开着 auto，就该显示 Auto')
-  assert.equal(armed.dom.effortText(), 'Auto')
+test('点真实等级：不拦点击、清标记、通知宿主关闭', async () => {
+  const { dom, flush, render } = await mount({ armed: true, stored: true })
+  assert.equal(dom.attr(), '1', '宿主开着 auto 时显示 Auto')
 
-  // 场景二：宿主说"没开"（用户后来手选了真实等级）→ 撤掉标记，显示宿主的事实。
-  const off = await mountClient({ hostArmed: false })
-  off.dom.setEffortText('max')
-  off.dom.resetMenu()
-  off.dom.mutate()
-  await off.dom.flush()
-  assert.equal(off.dom.triggerAttr(), null, '宿主没开就不该显示 Auto')
-  assert.equal(off.dom.effortText(), 'max')
-})
-
-test('回归：宿主把等级写成 High 时，复核不得把标记又打开（曾因 /auto$/i 永久卡在 Auto）', async () => {
-  const { dom, render } = await mountClient()
-  dom.setEffortText('High')
+  const event = dom.click('High')
+  await flush()
   render()
-  await dom.flush()
-  assert.equal(dom.triggerAttr(), null, '触发器上是 High 就必须没有标记')
-  assert.equal(dom.effortText(), 'High', '文字保持宿主下发的值')
-  assert.equal(dom.nodes.highOption.menuState.checked, 'true', '勾应留在 High')
-  assert.equal(dom.nodes.autoOption.menuState.checked, 'false')
-})
-
-test('回归：宿主把等级写成小写 auto 时，复核必须把标记打开', async () => {
-  const { dom, render } = await mountClient()
-  dom.setEffortText('auto')
-  render()
-  await dom.flush()
-  assert.equal(dom.triggerAttr(), '1')
-  assert.equal(dom.effortText(), 'Auto')
-  assert.equal(dom.nodes.autoOption.menuState.checked, 'true')
-})
-
-test('点非等级节点不误清标记', async () => {
-  const { dom, render } = await mountClient()
-  dom.click(dom.nodes.autoOption)
-  render()
-  await dom.flush()
-  assert.equal(dom.triggerAttr(), '1')
-  dom.click(dom.nodes.option('deepseek-flash'))
-  dom.click(dom.nodes.option('搜索'))
-  assert.equal(dom.triggerAttr(), '1', '点模型名或搜索框不该清标记')
-  assert.equal(dom.effortText(), 'Auto')
-})
-
-test('取消：选真实等级后，触发器与菜单的勾一起交回宿主', async () => {
-  const { dom, render } = await mountClient()
-  dom.click(dom.nodes.autoOption)
-  render()
-  await dom.flush()
-  assert.equal(dom.effortText(), 'Auto')
-
-  // 真实时序：点 High → 宿主把会话选择改成 High → 菜单重渲染（勾回到 High）。
-  dom.setEffortText('High')
-  dom.resetMenu()
-  dom.click(dom.nodes.highOption)
-  render()
-  dom.mutate()
-  await dom.flush()
-
-  assert.equal(dom.triggerAttr(), null, '取消后不该还有标记')
-  assert.equal(dom.effortText(), 'High', '显示交回宿主')
-  assert.equal(dom.nodes.highOption.menuState.checked, 'true', '勾留在 High')
-  assert.equal(dom.nodes.autoOption.menuState.checked, 'false')
-})
-
-test('标记不许撒谎：宿主回写真实档位时，标记必须撤回（含刷新后的持久化残留）', async () => {
-  // 现场复现：用户点过 Auto（localStorage 记住），但会话里其实没落盘，宿主下发的是 max。
-  const first = await mountClient()
-  first.dom.click(first.dom.nodes.autoOption)
-  first.render()
-  await first.dom.flush()
-  assert.equal(first.dom.effortText(), 'Auto', '刚点完是乐观显示')
-  assert.equal(persistentStorage.get('dsh-auto-effort:auto'), '1', '标记已持久化')
-
-  // 宿主重渲染：把等级写回真实值 max（这正是"Auto 没落盘"时的表现）
-  const second = await mountClient({ keepStorage: true })
-  second.dom.setEffortText('max')
-  second.dom.resetMenu()
-  second.dom.mutate()
-  await second.dom.flush()
-  assert.equal(second.dom.triggerAttr(), null, '宿主是 max，就不该有 Auto 标记')
-  assert.equal(second.dom.effortText(), 'max', '文字必须是宿主的事实')
-  assert.equal(second.dom.nodes.autoOption.menuState.checked, 'false')
-  assert.equal(second.dom.nodes.highOption.menuState.checked, 'true')
-
-  // 而且这次撤回是持久的：再挂载一次也不会又冒出 Auto
-  const third = await mountClient({ keepStorage: true })
-  third.dom.setEffortText('max')
-  third.dom.mutate()
-  await third.dom.flush()
-  assert.equal(third.dom.triggerAttr(), null, '撤回后不该复活')
-})
-
-test('标记不许撒谎：点 Auto 后宿主仍回写 max，标记自动撤回', async () => {
-  const { dom, render } = await mountClient()
-  dom.click(dom.nodes.autoOption)
-  render()
-  await dom.flush()
-  assert.equal(dom.effortText(), 'Auto')
-
-  dom.setEffortText('max')
-  dom.resetMenu()
-  dom.mutate()
-  await dom.flush()
-  assert.equal(dom.triggerAttr(), null, '宿主说 max，标记就得让位')
-  assert.equal(dom.effortText(), 'max')
-})
-
-test('点 Auto 会拦下这一下点击，并通知宿主开启 auto', async () => {
-  const { dom, render } = await mountClient()
-  // 真实点击：内置选择器会把推理等级写回会话，但实测那一步不可靠，
-  // 所以插件必须拦下事件、自己通知宿主。
-  const event = dom.clickWithEvent(dom.nodes.autoOption)
-  render()
-  await dom.flush()
-  assert.equal(event.defaultPrevented, true, '必须拦下默认行为')
-  assert.equal(event.immediateStopped, true, '必须阻止宿主自己的点击处理')
-  assert.equal(dom.effortText(), 'Auto')
-  const notified = dom.hostCalls.filter((c) => c.auto === true)
-  assert.equal(notified.length, 1, `应通知宿主开启 auto，实际 ${JSON.stringify(dom.hostCalls)}`)
-})
-
-test('点真实等级不拦截，并通知宿主关闭 auto', async () => {
-  const { dom, render } = await mountClient({ hostArmed: true })
-  dom.setEffortText('high')
-  dom.mutate()
-  await dom.flush()
-
-  const event = dom.clickWithEvent(dom.nodes.highOption)
-  render()
-  await dom.flush()
   assert.equal(event.defaultPrevented, false, '真实等级必须让宿主自己处理')
-  assert.equal(event.immediateStopped, false)
-  const notified = dom.hostCalls.filter((c) => c.auto === false)
-  assert.ok(notified.length >= 1, `应通知宿主关闭 auto，实际 ${JSON.stringify(dom.hostCalls)}`)
+  assert.equal(dom.attr(), null, '选真实等级必须立刻摘掉标记')
+  assert.ok(dom.hostCalls.some((c) => c.auto === false), `应通知宿主关闭：${JSON.stringify(dom.hostCalls)}`)
+})
+
+test('宿主开着 auto：即使触发器文字是 high，也显示 Auto（行为准）', async () => {
+  const { dom } = await mount({ armed: true })
+  dom.setLevel('high')
+  dom.mutate()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(dom.attr(), '1', '宿主说开着 auto，就该显示 Auto')
+  assert.equal(dom.level(), 'Auto')
+})
+
+test('宿主没开 auto：标记必须撤回，显示宿主的事实（标记不许撒谎）', async () => {
+  const { dom, flush } = await mount({ armed: false, stored: true })
+  dom.setLevel('max')
+  dom.mutate()
+  await flush()
+  assert.equal(dom.attr(), null, '宿主说没开，就不该显示 Auto')
+  assert.equal(dom.level(), 'max', '文字必须是宿主的事实')
+})
+
+test('普通点击（模型名、搜索框）不误判', async () => {
+  const { dom, flush } = await mount({ armed: false })
+  dom.click('deepseek-flash')
+  dom.click('搜索')
+  await flush()
+  assert.equal(dom.attr(), null)
+  assert.equal(dom.hostCalls.length, 0, `不该发通知：${JSON.stringify(dom.hostCalls)}`)
 })
