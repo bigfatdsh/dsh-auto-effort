@@ -589,3 +589,33 @@ test('回归：判定卡住也不会拖住请求（1.5s 硬超时后原样放行
     assert.equal(seen.effort, undefined, '超时后原样放行（适配器看到"没带档位"）')
   })
 })
+
+test('回归：打开 auto 开关必须同时把运行档从 off 抬回 auto（否则显示开着、实际不判定）', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'off' })
+    // 用"硬停用"启动：开关打开前，判定一次都不该发生
+    const { state } = apply(host.ctx, { mode: 'off', log: false })
+    await host.waterfall(request('你好', { sessionId: 's1', reasoningEffort: 'auto' }))
+    assert.equal(host.adapterCalls.length, 1, '关闭时不判定也要放行请求')
+    let status = await host.read()
+    assert.equal(status.stats.applied + status.stats.unchanged + status.stats.skipped, 0, '关闭时 stats 必须全 0')
+    assert.equal(status.mode, 'off')
+
+    // 打开开关：运行档要一起抬回 auto，且下一个请求立刻按判定走
+    const opened = await host.post({ enabled: true })
+    assert.equal(opened.enabled, true)
+    assert.equal(state.get(), 'auto', `开关打开后运行档应是 auto，实际 ${state.get()}`)
+    await host.waterfall(request('你好', { sessionId: 's2', reasoningEffort: 'max' }))
+    status = await host.read()
+    assert.ok(status.stats.applied + status.stats.unchanged >= 1, '打开后必须真的判定')
+    const last = host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)
+    assert.equal(last.effort, 'off', '问候应被判成 off（判定已接管）')
+
+    // 关掉开关：运行档回到 off，且不再判定
+    const closed = await host.post({ enabled: false })
+    assert.equal(closed.enabled, false)
+    await host.waterfall(request('你好', { sessionId: 's3', reasoningEffort: 'max' }))
+    const seen = host.adapterCalls.filter((row) => row.where === 'hostStream').at(-1)
+    assert.equal(seen.effort, 'max', '关闭后手选值原样放行')
+  })
+})
