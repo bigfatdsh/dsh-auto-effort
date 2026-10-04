@@ -241,7 +241,10 @@ try {
   await route.handler({ method: 'GET', url: '/dsh-auto-effort?catalog=deepseek/deepseek-flash' }, makeRes())
   const probed = responses[4].body
   assert.equal(probed.error, undefined, `catalog probe failed: ${JSON.stringify(probed)}`)
-  assert.ok(probed.efforts.some((level) => level.id === 'auto'), `Auto 必须在推理等级列表里：${JSON.stringify(probed.efforts)}`)
+  // 模型切换列表**不该**出现虚拟档位：开关在插件自己的"优化"面板里。
+  assert.equal(probed.efforts.some((level) => level.id === 'auto'), false,
+    `模型目录不该出现 auto：${JSON.stringify(probed.efforts)}`)
+  assert.ok(probed.efforts.length >= 4, '模型真正的等级要原样保留')
 
   // --- armed：浏览器选中 auto 后，判定必须接管（宿主落盘那一步实测不可靠）---
   const postArmed = async (body) => {
