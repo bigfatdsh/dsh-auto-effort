@@ -50,21 +50,20 @@
    要让自动判定完全接管（连手选的强度也照降），把 `effortFloor` 配成 `off`。
 4. `effortCeiling` 默认**不存在**：判定需要 `max` 就是 `max`。
 
-## 4. Auto 档位是怎么接进选择器的
+## 4. 虚拟档位怎么进入判定
 
-选择器的推理等级列表就是宿主 `llm.resolveModelInfo()` 的返回，所以插件在服务层包了两个
-方法（只在模型**本来就有**推理能力时生效）：
+模型切换列表**不再**出现 `auto`。插件在服务层只包出站那一条路径：
 
-1. **`resolveModelInfo`**：往 `reasoning.efforts` 末尾追加 `{ id: 'auto', name: 'Auto' }`。
-   只影响展示与选择，不改任何模型能力。
-2. **`prepareCall`**：宿主装配请求时会拿这份配置去适配器校验，而适配器不认识 `auto`，
-   所以先摘掉它再往下传；真正的强度由 `llm/stream` 上的判定算出来写回去
-   （那一刻已经在适配器校验之后）。
+1. **`stream` / `prepareCall` / `resolveCallConfig` / `resolveCallFor`**：宿主装配请求时
+   适配器不认识 `auto`，所以先摘掉它再往下传；真正的强度由 `llm/stream` 上的判定算出来
+   写回去（那一刻已在适配器校验之后）。
+2. **`resolveModelInfo` 不再被包**：模型目录原样透传，列表只显示模型真正支持的等级。
 
-面板外的三个运行档仍然可用，只是入口变成配置：`mode: auto | pin | off`。
+开关在插件自己的"优化"面板里（见上面那节）。三个运行档仍然可用，只是入口变成配置：
+`mode: auto | pin | off`。
 
-诊断：`GET /dsh-auto-effort?catalog=provider/model` 回报**经过本插件之后**那条路由的推理
-等级列表——"Auto 没出现在菜单里"时用它确认，不用猜。
+诊断：`GET /dsh-auto-effort?catalog=provider/model` 回报那条路由的推理等级列表——用来
+确认"列表里确实没有被插件塞进去的档位"。
 
 ## 5. 行为边界（改了什么、没改什么）
 
@@ -81,7 +80,6 @@
 | --- | --- | --- |
 | `mode` | `auto` | `auto`（判定接管，含手选值）/ `pin`（只在没手选时判定）/ `off`（完全不碰）。 |
 | `enabled` | `true` | 是否启用。`false` 等价于 `mode: off`。 |
-| `effortId` / `effortName` | `auto` / `Auto` | 出现在选择器里的档位 id 与显示名。 |
 | `persist` | `true` | 档位写到 `<DSH_HOME>/auto-effort.json`，重启后保持。 |
 | `minTier` / `maxTier` | `off` / `max` | 判定的人为上下限。 |
 | `effortFloor` | `off` | `off`（不设下界）/ `observed`（保护手选值）/ `adapter-default`（不低于模型默认档）/ 具体档位。 |
