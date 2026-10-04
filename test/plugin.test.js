@@ -45,7 +45,7 @@ test('插件名与 bundle 补丁里的 id 一致', () => {
 })
 
 test('依赖声明：llm 与 webServer 都是硬依赖（实测 ctx.get 取不到 webServer）', () => {
-  assert.deepEqual(inject, ['llm', 'webServer'])
+  assert.deepEqual(inject, ['llm', 'webServer', 'systemPrompt'], 'systemPrompt 是精简化段落的注入面')
 })
 
 test('配置校验：虚拟档位的 id 与显示名有默认值', () => {
@@ -118,7 +118,8 @@ test('开关状态：写盘后能读回，且文件是完整 JSON', async () => 
     writer.set('pin')
     const raw = JSON.parse(await readFile(file, 'utf8'))
     assert.deepEqual(raw, { mode: 'pin',
-      armed: false, })
+      armed: false,
+      concise: false, })
 
     const reader = new ToggleState({ initial: 'auto', file })
     assert.equal(await reader.load(), true)
