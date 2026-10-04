@@ -117,7 +117,8 @@ test('开关状态：写盘后能读回，且文件是完整 JSON', async () => 
     const writer = new ToggleState({ initial: 'auto', file })
     writer.set('pin')
     const raw = JSON.parse(await readFile(file, 'utf8'))
-    assert.deepEqual(raw, { mode: 'pin' })
+    assert.deepEqual(raw, { mode: 'pin',
+      armed: false, })
 
     const reader = new ToggleState({ initial: 'auto', file })
     assert.equal(await reader.load(), true)
