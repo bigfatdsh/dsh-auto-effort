@@ -20,7 +20,6 @@ import {
   apply,
   isVirtualEffort,
   throughAuto,
-  withAutoEffort,
   withoutVirtualEffort,
 } from '../lib/index.js'
 import { applyTier, decideRequest } from '../lib/request.js'
@@ -216,15 +215,13 @@ test('装配：model adapter 永不见 auto（四条出站入口都要挡住）'
   })
 })
 
-test('装配：目录里追加 Auto 只做一次，且不改模型自带等级', async () => {
+test('装配：模型目录一个字节都不改（列表只显示模型真正的等级）', async () => {
   await withTempHome(async () => {
     const host = fakeHost({ defaultEffort: 'off' })
     apply(host.ctx, { mode: 'auto', log: false })
-    const first = await host.llm.resolveModelInfo('deepseek', 'deepseek-flash')
-    const second = await host.llm.resolveModelInfo('deepseek', 'deepseek-flash')
-    assert.deepEqual(first.reasoning.efforts.map((e) => e.id), [...LEVELS, 'auto'])
-    assert.deepEqual(second.reasoning.efforts.map((e) => e.id), [...LEVELS, 'auto'], '重复调用不应重复追加')
-    assert.equal(first.reasoning.defaultEffort, 'off', '默认档位不被改动')
+    const info = await host.llm.resolveModelInfo('deepseek', 'deepseek-flash')
+    assert.deepEqual(info.reasoning.efforts.map((e) => e.id), LEVELS, '不该再往目录里追加 auto')
+    assert.equal(info.reasoning.defaultEffort, 'off', '默认档位也不动')
   })
 })
 
@@ -384,14 +381,6 @@ test('isVirtualEffort：只认完全相等的虚拟档位', () => {
   assert.equal(isVirtualEffort({ reasoningEffort: 'Auto' }, config), false)
   assert.equal(isVirtualEffort({ reasoningEffort: 'high' }, config), false)
   assert.equal(isVirtualEffort(null, config), false)
-})
-
-test('withAutoEffort：模型自带 auto 时不重复追加；未知 defaultEffort 不越界', () => {
-  const config = { effortId: 'auto', effortName: 'Auto', effortDescription: 'x', autoDefault: true }
-  const already = { reasoning: { efforts: [{ id: 'auto', name: 'Auto' }], defaultEffort: 'auto' } }
-  assert.equal(withAutoEffort(already, config), already)
-  const plain = { reasoning: { efforts: [{ id: 'high', name: 'High' }] } }
-  assert.equal(withAutoEffort(plain, config).reasoning.defaultEffort, 'auto')
 })
 
 test('applyTier：缺失或畸形策略按默认边界处理', () => {
