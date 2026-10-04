@@ -332,6 +332,28 @@ function createPickerDom() {
     disconnect() {}
   }
 
+  /** 派发一次点击；返回事件对象，`immediateStopped` 表示插件拦下了这一下。 */
+  const clickWithEvent = (node) => {
+    const event = {
+      target: node,
+      defaultPrevented: false,
+      immediateStopped: false,
+      preventDefault() {
+        this.defaultPrevented = true
+      },
+      stopPropagation() {},
+      stopImmediatePropagation() {
+        this.immediateStopped = true
+      },
+    }
+    for (const listener of listeners) {
+      if (listener.type !== 'click') continue
+      listener.fn(event)
+      if (event.immediateStopped) break
+    }
+    return event
+  }
+
   return {
     document,
     nodes: { trigger, effort, option, autoOption, highOption, lowOption },
@@ -343,8 +365,18 @@ function createPickerDom() {
     },
     styleText: () => styleText,
     click: (node) => {
-      for (const listener of listeners) if (listener.type === 'click') listener.fn({ target: node })
+      clickWithEvent(node)
     },
+    /**
+     * 造一个够真的点击事件并派发。
+     *
+     * 返回事件对象，让用例能断言"插件有没有拦下这一下"——选中 Auto 时必须拦下，
+     * 因为内置选择器把等级写回会话那一步实测不可靠。
+     *
+     * @param {object} node - 被点的节点。
+     * @returns {object} 事件对象。
+     */
+    clickWithEvent: (node) => clickWithEvent(node),
     mutate: () => {
       for (const observer of observers) observer.fn()
     },
@@ -367,6 +399,15 @@ async function mountClient(options = {}) {
   // 默认清掉持久化：多数用例要的是"干净的一次挂载"。只有验证刷新行为的用例
   // 才传 `{ keepStorage: true }`——否则上一个用例留下的标记会让它假通过/假失败。
   if (options.keepStorage !== true) persistentStorage.clear()
+  // 宿主端点的替身：`GET` 回答"是不是 auto 模式"，`POST` 记录浏览器半边的通知。
+  const hostCalls = []
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === 'POST') {
+      hostCalls.push(JSON.parse(String(init.body)))
+      return { json: async () => ({ auto: JSON.parse(String(init.body)).auto }) }
+    }
+    return { json: async () => ({ config: { armed: options.hostArmed === true } }) }
+  }
   const dom = createPickerDom()
   // bundle 里的 `document` 是 load 那一刻抓到的引用：必须把受控 DOM 交给它。
   globalThis.document = dom.document
@@ -427,6 +468,7 @@ async function mountClient(options = {}) {
     },
   })
   /** 重新渲染零尺寸组件（清掉上一轮 effect，跑新一轮）。 */
+  dom.hostCalls = hostCalls
   const render = () => {
     if (rendering) {
       dirty = true
@@ -475,18 +517,24 @@ test('真实 DOM：宿主回写 auto 时，控制器文本复核把标记补上�
   assert.equal(dom.effortText(), 'Auto', '并且文字要真的换成 Auto')
 })
 
-test('标记会持久化：刷新后仍然是 Auto', async () => {
-  const first = await mountClient()
-  first.dom.click(first.dom.nodes.option('Auto'))
-  assert.equal(first.dom.triggerAttr(), '1')
-  assert.equal(first.dom.effortText(), 'Auto')
+test('刷新后以宿主为准：宿主开着 auto 就显示 Auto，宿主关掉就撤掉', async () => {
+  // 新契约：显示跟着宿主的 auto 状态走（宿主文本可能因为落盘不可靠而仍是 high）。
+  // 场景一：宿主说"auto 开着" → 即使触发器等文字是 high，也要显示 Auto。
+  const armed = await mountClient({ hostArmed: true })
+  armed.dom.setEffortText('high')
+  armed.dom.mutate()
+  await armed.dom.flush()
+  assert.equal(armed.dom.triggerAttr(), '1', '宿主开着 auto，就该显示 Auto')
+  assert.equal(armed.dom.effortText(), 'Auto')
 
-  // 重新挂载（同一 localStorage，模拟刷新）
-  const second = await mountClient({ keepStorage: true })
-  await second.dom.flush()
-  assert.equal(second.dom.triggerAttr(), '1', '刷新后标记不能丢')
-  assert.equal(second.dom.effortText(), 'Auto', '刷新后文字也必须是 Auto')
-  assert.equal(second.dom.nodes.autoOption.menuState.checked, 'true', '刷新后菜单里的勾也要在 Auto 上')
+  // 场景二：宿主说"没开"（用户后来手选了真实等级）→ 撤掉标记，显示宿主的事实。
+  const off = await mountClient({ hostArmed: false })
+  off.dom.setEffortText('max')
+  off.dom.resetMenu()
+  off.dom.mutate()
+  await off.dom.flush()
+  assert.equal(off.dom.triggerAttr(), null, '宿主没开就不该显示 Auto')
+  assert.equal(off.dom.effortText(), 'max')
 })
 
 test('回归：宿主把等级写成 High 时，复核不得把标记又打开（曾因 /auto$/i 永久卡在 Auto）', async () => {
@@ -584,4 +632,33 @@ test('标记不许撒谎：点 Auto 后宿主仍回写 max，标记自动撤回'
   await dom.flush()
   assert.equal(dom.triggerAttr(), null, '宿主说 max，标记就得让位')
   assert.equal(dom.effortText(), 'max')
+})
+
+test('点 Auto 会拦下这一下点击，并通知宿主开启 auto', async () => {
+  const { dom, render } = await mountClient()
+  // 真实点击：内置选择器会把推理等级写回会话，但实测那一步不可靠，
+  // 所以插件必须拦下事件、自己通知宿主。
+  const event = dom.clickWithEvent(dom.nodes.autoOption)
+  render()
+  await dom.flush()
+  assert.equal(event.defaultPrevented, true, '必须拦下默认行为')
+  assert.equal(event.immediateStopped, true, '必须阻止宿主自己的点击处理')
+  assert.equal(dom.effortText(), 'Auto')
+  const notified = dom.hostCalls.filter((c) => c.auto === true)
+  assert.equal(notified.length, 1, `应通知宿主开启 auto，实际 ${JSON.stringify(dom.hostCalls)}`)
+})
+
+test('点真实等级不拦截，并通知宿主关闭 auto', async () => {
+  const { dom, render } = await mountClient({ hostArmed: true })
+  dom.setEffortText('high')
+  dom.mutate()
+  await dom.flush()
+
+  const event = dom.clickWithEvent(dom.nodes.highOption)
+  render()
+  await dom.flush()
+  assert.equal(event.defaultPrevented, false, '真实等级必须让宿主自己处理')
+  assert.equal(event.immediateStopped, false)
+  const notified = dom.hostCalls.filter((c) => c.auto === false)
+  assert.ok(notified.length >= 1, `应通知宿主关闭 auto，实际 ${JSON.stringify(dom.hostCalls)}`)
 })
