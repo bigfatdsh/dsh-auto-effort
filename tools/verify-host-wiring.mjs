@@ -25,6 +25,12 @@ import { ROUTE_PATH, apply } from '../lib/index.js'
  * @param {string} url - 带查询串的路径。
  * @returns {Promise<object>} 响应体。
  */
+async function drain(stream) {
+  for await (const _chunk of stream) {
+    // 排干即可：这里只关心适配器收到什么。
+  }
+}
+
 async function readRoute(entry, url) {
   const collected = []
   await entry.handler({ method: 'GET', url }, {
@@ -236,6 +242,39 @@ try {
   const probed = responses[4].body
   assert.equal(probed.error, undefined, `catalog probe failed: ${JSON.stringify(probed)}`)
   assert.ok(probed.efforts.some((level) => level.id === 'auto'), `Auto 必须在推理等级列表里：${JSON.stringify(probed.efforts)}`)
+
+  // --- armed：浏览器选中 auto 后，判定必须接管（宿主落盘那一步实测不可靠）---
+  const postArmed = async (body) => {
+    const request = (async function* chunks() {
+      yield Buffer.from(JSON.stringify(body), 'utf8')
+    })()
+    request.method = 'POST'
+    request.url = ROUTE_PATH
+    const out = []
+    await route.handler(request, { writeHead(status) { out.push(status) }, end(payload) { out.push(payload.toString('utf8')) } })
+    return out
+  }
+  const statusBefore = await postArmed({ auto: true })
+  assert.equal(statusBefore[0], 200, 'POST {auto:true} 必须 200')
+  assert.match(String(statusBefore[1]), /"auto":true/, 'POST 必须回报 armed=true')
+
+  /** 跑一次请求并取适配器收到的档位（host.dispatched 记录的就是重入后的 options）。 */
+  const adapterEffort = async (options) => {
+    const before = host.dispatched.length
+    await host.waterfall({ ...options, sessionId: `armed-${Math.random().toString(36).slice(2)}` })
+    const entry = host.dispatched[before]
+    return entry === undefined ? undefined : entry.reasoningEffort
+  }
+
+  assert.equal(await adapterEffort({ provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'max', messages: [{ role: 'user', content: '你好' }] }), 'off',
+    'armed 时请求带的 max 必须交给判定（问候→off）')
+  assert.equal(await adapterEffort({ provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'max', messages: [{ role: 'user', content: '全面审查这 8 个模块，必须零错误，不能遗漏任何一处。第一步建清单，第二步核对，第三步修复。' }] }), 'max',
+    'armed 时重活仍应到 max')
+
+  const statusOff = await postArmed({ auto: false })
+  assert.match(String(statusOff[1]), /"auto":false/, 'POST {auto:false} 必须回报 armed=false')
+  assert.equal(await adapterEffort({ provider: 'deepseek', model: 'deepseek-flash', reasoningEffort: 'max', messages: [{ role: 'user', content: '你好' }] }), 'max',
+    '取消 armed 后手选值必须原样保留')
 
   console.log('host wiring OK')
   console.log(host.logs.filter((line) => line.startsWith('auto-effort:')).join('\n'))
