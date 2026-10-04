@@ -522,3 +522,54 @@ test('模糊：decideRequest 在随机选项下不抛错，且绝不把 auto 交
   }
 })
 
+
+test('回归：armed（auto 已开）时每个请求最多重入一次，绝不无限循环', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'off' })
+    // 计每一次真正到达适配器的调用：无限重入会让这个数字失控。
+    let adapterCalls = 0
+    const original = host.llm.stream
+    host.llm.stream = (request) => {
+      adapterCalls += 1
+      if (adapterCalls > 20) throw new Error(`重入失控：adapter 被调用 ${adapterCalls} 次`)
+      return original(request)
+    }
+    apply(host.ctx, { mode: 'auto', log: false })
+    await host.post({ auto: true })
+    adapterCalls = 0
+
+    // 各种形态都打一遍：带真实档位、带 auto、重活、只读档位名。
+    const shapes = [
+      { text: '你好', effort: 'max' },
+      { text: '审计这 12 个模块，必须零错误，另外还要给出回归测试与上线清单', effort: 'max' },
+      { text: '加个缓存', effort: 'high' },
+      { text: '你好', effort: 'auto' },
+      { text: '把这个函数重构成流式，注意不要动调用点', effort: 'auto' },
+    ]
+    for (const shape of shapes) {
+      const before = adapterCalls
+      await host.waterfall(request(shape.text, { sessionId: `s-${shape.effort}-${shape.text.length}`, reasoningEffort: shape.effort }))
+      const used = adapterCalls - before
+      assert.equal(used, 1, `"${shape.text.slice(0, 12)}"（${shape.effort}）触发了 ${used} 次适配器调用，应恰好 1 次`)
+    }
+  })
+})
+
+test('回归：连续 200 次请求不泄漏、不累积（内存与状态都有上限）', async () => {
+  await withTempHome(async () => {
+    const host = fakeHost({ defaultEffort: 'off' })
+    apply(host.ctx, { mode: 'auto', log: false })
+    await host.post({ auto: true })
+    for (let i = 0; i < 200; i += 1) {
+      // 会话 id 每次都换：也会同时压到 perSession / tasks 两个表的上限逻辑。
+      await host.waterfall(request(i % 3 === 0 ? '你好' : '审计这 12 个模块，必须零错误，另外还要给出回归测试与上线清单', {
+        sessionId: `s${i}`,
+        reasoningEffort: 'max',
+      }))
+    }
+    const decisions = (await host.read(`${ROUTE_PATH}?decisions=1`)).decisions
+    assert.ok(decisions.length <= 20, `决策流水要有上限，实际 ${decisions.length}`)
+    const status = await host.read(ROUTE_PATH)
+    assert.ok(status.stats.applied + status.stats.unchanged + status.stats.skipped >= 200)
+  })
+})
